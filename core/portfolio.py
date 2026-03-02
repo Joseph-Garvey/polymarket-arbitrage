@@ -10,7 +10,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Optional
 
-from polymarket_client.models import OrderSide, Position, TokenType, Trade
+from polymarket_client.models import Order, OrderSide, OrderStatus, Position, TokenType, Trade
 
 
 logger = logging.getLogger(__name__)
@@ -91,7 +91,10 @@ class Portfolio:
         
         # Current prices for unrealized PnL calculation
         self._current_prices: dict[str, dict[TokenType, float]] = {}
-        
+
+        # Bundle signal tracking: signal_id -> list of placed Orders
+        self._bundle_signals: dict[str, list[Order]] = {}
+
         logger.info(f"Portfolio initialized with balance: {initial_balance}")
     
     def update_from_fill(self, trade: Trade) -> None:
@@ -323,6 +326,31 @@ class Portfolio:
         """Get recent trades."""
         return self._trades[-limit:]
     
+    def register_bundle_signal(self, signal_id: str, orders: list[Order]) -> None:
+        """Register the placed orders for a bundle arb signal for completion tracking."""
+        self._bundle_signals[signal_id] = list(orders)
+
+    def check_bundle_completion(self, signal_id: str) -> str:
+        """
+        Check whether all legs of a bundle arb signal have filled.
+
+        Returns 'complete', 'partial', or 'pending'.
+        A 'partial' result means at least one leg filled but not all —
+        the caller should trigger an unwind to close directional exposure.
+        """
+        orders = self._bundle_signals.get(signal_id)
+        if not orders:
+            return "pending"
+
+        expected_legs = len(orders)
+        filled_legs = sum(1 for o in orders if o.status == OrderStatus.FILLED)
+
+        if filled_legs == expected_legs:
+            return "complete"
+        if filled_legs > 0:
+            return "partial"
+        return "pending"
+
     def reset(self) -> None:
         """Reset portfolio to initial state."""
         self._positions = {}
@@ -330,5 +358,6 @@ class Portfolio:
         self.cash_balance = self.initial_balance
         self.stats = PortfolioStats()
         self._current_prices = {}
+        self._bundle_signals = {}
         logger.info("Portfolio reset")
 

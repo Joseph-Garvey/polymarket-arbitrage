@@ -114,23 +114,24 @@ class ArbEngine:
         
         logger.info(f"ArbEngine initialized with min_edge={config.min_edge}, min_spread={config.min_spread}")
     
-    def analyze(self, market_state: MarketState) -> list[Signal]:
+    def analyze(self, market_state: MarketState, bankroll: float = 100.0) -> list[Signal]:
         """
         Analyze a market state and generate trading signals.
-        
+
         Returns a list of signals (may be empty if no opportunities).
+        bankroll is the current available cash, used for Kelly position sizing.
         """
         signals: list[Signal] = []
-        
+
         order_book = market_state.order_book
         market_id = market_state.market.market_id
-        
+
         # Check if previously tracked opportunities have expired
         self._check_expired_opportunities(market_id, order_book)
-        
+
         # Check for bundle arbitrage
         if self.config.bundle_arb_enabled:
-            bundle_signal = self._check_bundle_arbitrage(market_id, order_book)
+            bundle_signal = self._check_bundle_arbitrage(market_id, order_book, bankroll)
             if bundle_signal:
                 signals.append(bundle_signal)
         
@@ -273,7 +274,27 @@ class ArbEngine:
             ]
         }
     
-    def _check_bundle_arbitrage(self, market_id: str, order_book: OrderBook) -> Optional[Signal]:
+    def _kelly_size(self, edge: float, price: float, max_size: float, bankroll: float,
+                    fraction: float = 0.25) -> float:
+        """
+        Kelly criterion position sizing (quarter-Kelly by default).
+
+        For binary arb, p(win) ≈ 1 but execution risk means we apply a fraction.
+        f* ≈ edge / price, then scale by fraction and bankroll.
+        Capped at 20% of bankroll per trade.
+        """
+        if price <= 0 or price >= 1:
+            return self.config.min_order_size
+
+        kelly_fraction = (edge / price) * fraction
+        kelly_fraction = max(0.0, min(kelly_fraction, 0.20))
+
+        suggested = bankroll * kelly_fraction
+        return max(self.config.min_order_size,
+                   min(suggested, max_size, self.config.max_order_size))
+
+    def _check_bundle_arbitrage(self, market_id: str, order_book: OrderBook,
+                                 bankroll: float = 100.0) -> Optional[Signal]:
         """
         Check for bundle mispricing opportunities.
         
@@ -316,17 +337,27 @@ class ArbEngine:
         
         if net_edge_long >= self.config.min_edge:
             edge = net_edge_long  # Use NET edge (after fees)
-            
+
             # Calculate max size based on liquidity
             yes_ask_size = order_book.yes.best_ask_size or 0
             no_ask_size = order_book.no.best_ask_size or 0
             max_size = min(yes_ask_size, no_ask_size)
-            
-            suggested_size = min(
-                self.config.default_order_size / max(best_ask_yes, best_ask_no),
-                max_size
+
+            # Liquidity gate: both legs must have enough depth to execute
+            min_executable = self.config.min_order_size * 2
+            if yes_ask_size < min_executable or no_ask_size < min_executable:
+                logger.debug(
+                    f"Skipping {market_id} bundle long: insufficient liquidity "
+                    f"(YES={yes_ask_size:.2f}, NO={no_ask_size:.2f})"
+                )
+                return None
+
+            suggested_size = self._kelly_size(
+                edge=net_edge_long,
+                price=total_ask,
+                max_size=max_size,
+                bankroll=bankroll,
             )
-            suggested_size = max(self.config.min_order_size, suggested_size)
             
             opportunity = Opportunity(
                 opportunity_id=f"bundle_long_{uuid.uuid4().hex[:8]}",
@@ -356,17 +387,27 @@ class ArbEngine:
         
         if opportunity is None and net_edge_short >= self.config.min_edge:
             edge = net_edge_short  # Use NET edge (after fees)
-            
+
             # Calculate max size based on liquidity
             yes_bid_size = order_book.yes.best_bid_size or 0
             no_bid_size = order_book.no.best_bid_size or 0
             max_size = min(yes_bid_size, no_bid_size)
-            
-            suggested_size = min(
-                self.config.default_order_size / max(best_bid_yes, best_bid_no),
-                max_size
+
+            # Liquidity gate: both legs must have enough depth to execute
+            min_executable = self.config.min_order_size * 2
+            if yes_bid_size < min_executable or no_bid_size < min_executable:
+                logger.debug(
+                    f"Skipping {market_id} bundle short: insufficient liquidity "
+                    f"(YES={yes_bid_size:.2f}, NO={no_bid_size:.2f})"
+                )
+                return None
+
+            suggested_size = self._kelly_size(
+                edge=net_edge_short,
+                price=total_bid,
+                max_size=max_size,
+                bankroll=bankroll,
             )
-            suggested_size = max(self.config.min_order_size, suggested_size)
             
             opportunity = Opportunity(
                 opportunity_id=f"bundle_short_{uuid.uuid4().hex[:8]}",

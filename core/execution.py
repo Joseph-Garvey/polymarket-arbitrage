@@ -161,56 +161,152 @@ class ExecutionEngine:
     
     async def _handle_place_orders(self, signal: Signal) -> None:
         """Handle a place_orders signal."""
+        # Validate arb signals are still live before touching the market
+        if signal.opportunity and signal.opportunity.is_bundle_arb:
+            if not await self._validate_arb_still_live(signal):
+                self.stats.signals_rejected += 1
+                return
+
+        # Bundle arb: place all legs simultaneously to avoid leg risk
+        if signal.opportunity and signal.opportunity.is_bundle_arb:
+            await self._place_orders_concurrent(signal)
+        else:
+            # Market-making: sequential is fine
+            for order_spec in signal.orders:
+                await self._place_single_order(signal, order_spec)
+
+    async def _place_single_order(self, signal: Signal, order_spec: dict) -> Optional[Order]:
+        """Validate and place one leg of a signal. Returns the Order or None."""
+        try:
+            token_type = order_spec["token_type"]
+            side = order_spec["side"]
+            price = order_spec["price"]
+            size = order_spec["size"]
+            strategy_tag = order_spec.get("strategy_tag", "")
+
+            if self.config.enable_slippage_check and signal.opportunity:
+                if not self._check_slippage(signal.opportunity, order_spec):
+                    self.stats.slippage_rejections += 1
+                    logger.warning(f"Order rejected due to slippage: {order_spec}")
+                    return None
+
+            proposed_order = Order(
+                order_id="temp",
+                market_id=signal.market_id,
+                token_type=token_type,
+                side=side,
+                price=price,
+                size=size,
+                strategy_tag=strategy_tag,
+            )
+            if not self.risk_manager.check_order(proposed_order):
+                self.stats.signals_rejected += 1
+                logger.warning(f"Order rejected by risk manager: {order_spec}")
+                return None
+
+            order = await self._place_order(
+                market_id=signal.market_id,
+                token_type=token_type,
+                side=side,
+                price=price,
+                size=size,
+                strategy_tag=strategy_tag,
+            )
+            if order:
+                self._track_order(order)
+                self.stats.orders_placed += 1
+                self.stats.total_notional += order.notional
+            return order
+
+        except Exception as e:
+            logger.error(f"Failed to place order: {e}")
+            self.stats.orders_rejected += 1
+            return None
+
+    async def _place_orders_concurrent(self, signal: Signal) -> None:
+        """Place all legs of an arb signal simultaneously via asyncio.gather."""
+        # Pre-validate every leg before launching any placement
         for order_spec in signal.orders:
-            try:
-                # Extract order parameters
-                token_type = order_spec["token_type"]
-                side = order_spec["side"]
-                price = order_spec["price"]
-                size = order_spec["size"]
-                strategy_tag = order_spec.get("strategy_tag", "")
-                
-                # Check slippage if enabled
-                if self.config.enable_slippage_check and signal.opportunity:
-                    if not self._check_slippage(signal.opportunity, order_spec):
-                        self.stats.slippage_rejections += 1
-                        logger.warning(f"Order rejected due to slippage: {order_spec}")
-                        continue
-                
-                # Check risk limits
-                proposed_order = Order(
-                    order_id="temp",
-                    market_id=signal.market_id,
-                    token_type=token_type,
-                    side=side,
-                    price=price,
-                    size=size,
-                    strategy_tag=strategy_tag,
-                )
-                
-                if not self.risk_manager.check_order(proposed_order):
-                    self.stats.signals_rejected += 1
-                    logger.warning(f"Order rejected by risk manager: {order_spec}")
-                    continue
-                
-                # Place the order
-                order = await self._place_order(
-                    market_id=signal.market_id,
-                    token_type=token_type,
-                    side=side,
-                    price=price,
-                    size=size,
-                    strategy_tag=strategy_tag,
-                )
-                
-                if order:
-                    self._track_order(order)
-                    self.stats.orders_placed += 1
-                    self.stats.total_notional += order.notional
-                    
-            except Exception as e:
-                logger.error(f"Failed to place order: {e}")
-                self.stats.orders_rejected += 1
+            if self.config.enable_slippage_check and signal.opportunity:
+                if not self._check_slippage(signal.opportunity, order_spec):
+                    self.stats.slippage_rejections += 1
+                    logger.warning("Concurrent arb aborted: slippage on pre-check")
+                    return
+            proposed = Order(
+                order_id="temp",
+                market_id=signal.market_id,
+                token_type=order_spec["token_type"],
+                side=order_spec["side"],
+                price=order_spec["price"],
+                size=order_spec["size"],
+                strategy_tag=order_spec.get("strategy_tag", ""),
+            )
+            if not self.risk_manager.check_order(proposed):
+                self.stats.signals_rejected += 1
+                logger.warning("Concurrent arb aborted: risk check failed on pre-check")
+                return
+
+        # Launch all legs simultaneously
+        tasks = [
+            self._place_order(
+                market_id=signal.market_id,
+                token_type=spec["token_type"],
+                side=spec["side"],
+                price=spec["price"],
+                size=spec["size"],
+                strategy_tag=spec.get("strategy_tag", ""),
+            )
+            for spec in signal.orders
+        ]
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+
+        placed: list[Order] = []
+        failed = False
+        for result in results:
+            if isinstance(result, Exception) or result is None:
+                failed = True
+            else:
+                placed.append(result)
+                self._track_order(result)
+                self.stats.orders_placed += 1
+                self.stats.total_notional += result.notional
+
+        if failed and placed:
+            logger.warning(
+                f"Partial arb fill on {signal.market_id} — "
+                f"cancelling {len(placed)} placed leg(s) to avoid directional exposure"
+            )
+            for order in placed:
+                await self.cancel_order(order.order_id)
+
+    async def _validate_arb_still_live(self, signal: Signal) -> bool:
+        """
+        Re-check the order book to confirm the arb opportunity still exists.
+
+        Rejects signals older than 5 seconds or where the edge has closed.
+        """
+        opp = signal.opportunity
+        if not opp:
+            return True
+
+        signal_age_ms = (datetime.utcnow() - opp.detected_at).total_seconds() * 1000
+        if signal_age_ms > 5000:
+            logger.warning(
+                f"Arb signal too old ({signal_age_ms:.0f}ms), discarding {signal.signal_id}"
+            )
+            return False
+
+        try:
+            current_book = await self.client.get_orderbook(signal.market_id)
+            best_ask_yes = current_book.best_ask_yes or 1.0
+            best_ask_no = current_book.best_ask_no or 1.0
+            current_total_ask = best_ask_yes + best_ask_no
+            if 1.0 - current_total_ask < 0.005:
+                logger.info(f"Arb closed before execution on {signal.market_id}")
+                return False
+            return True
+        except Exception:
+            return False  # Don't trade if we can't verify
     
     async def _handle_cancel_orders(self, signal: Signal) -> None:
         """Handle a cancel_orders signal."""

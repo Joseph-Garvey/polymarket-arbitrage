@@ -28,7 +28,7 @@ trading:
   markets: []
   
   # Arbitrage settings
-  min_edge: 0.01           # 1% edge required for bundle arbitrage
+  min_edge: 0.02           # 2% edge required — real minimum after taker fees (3%) + slippage buffer
   bundle_arb_enabled: true
   
   # Market-making settings
@@ -37,9 +37,9 @@ trading:
   mm_enabled: false        # Disabled for real data (markets too efficient)
   
   # Order sizing - SMALL for $50 budget
-  default_order_size: 5    # $5 per order
-  min_order_size: 2        # $2 minimum
-  max_order_size: 10       # $10 max per order
+  default_order_size: 3    # $5 per order
+  min_order_size: 1        # $2 minimum
+  max_order_size: 5      # $10 max per order
   
   # Execution settings
   slippage_tolerance: 0.02  # Max allowed slippage from signal to execution
