@@ -296,7 +296,7 @@ class ArbEngine:
         f* ≈ edge / price, then scale by fraction and bankroll.
         Capped at 20% of bankroll per trade.
         """
-        if price <= 0 or price >= 1:
+        if edge <= 0 or price <= 0:
             return self.config.min_order_size
 
         kelly_fraction = (edge / price) * fraction
@@ -449,7 +449,10 @@ class ArbEngine:
         # Only suppress re-entry if we already have an open position in this market
         # (the old 2-second blanket cooldown was blocking valid repeating opportunities).
         if self._portfolio is not None:
-            has_open_position = self._portfolio.get_exposure(market_id)["total_notional"] > 0
+            has_open_position = (
+                self._portfolio.get_exposure(market_id)["total_notional"] > 0
+                or market_id in self._portfolio._open_arb_pairs
+            )
             if has_open_position:
                 return None
 

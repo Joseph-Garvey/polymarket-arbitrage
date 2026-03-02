@@ -16,6 +16,7 @@ from polymarket_client.models import (
     OpportunityType,
 )
 from core.arb_engine import ArbEngine, ArbConfig
+from core.portfolio import Portfolio
 
 
 @pytest.fixture
@@ -285,9 +286,59 @@ class TestEdgeCases:
             no_bid=0.01,
             no_ask=0.02,
         )
-        
+
         state = create_market_state(order_book)
         # Should not crash
         signals = arb_engine.analyze(state)
         assert isinstance(signals, list)
+
+
+class TestPortfolioAwareCooldown:
+    """Tests for portfolio-gated re-entry suppression."""
+
+    def _profitable_book(self) -> OrderBook:
+        return create_order_book(
+            market_id="test_market",
+            yes_bid=0.43, yes_ask=0.45,
+            no_bid=0.48, no_ask=0.50,
+        )
+
+    def test_signals_when_no_open_position(self, arb_config: ArbConfig):
+        """Engine signals a bundle arb when portfolio has no open position."""
+        portfolio = Portfolio(initial_balance=10000.0)
+        engine = ArbEngine(arb_config, portfolio=portfolio)
+
+        state = create_market_state(self._profitable_book())
+        signals = engine.analyze(state)
+
+        bundle = [s for s in signals if s.opportunity and s.opportunity.is_bundle_arb]
+        assert len(bundle) == 1
+
+    def test_suppresses_reentry_when_open_position(self, arb_config: ArbConfig):
+        """Engine emits no bundle signal when an arb pair is already open."""
+        portfolio = Portfolio(initial_balance=10000.0)
+        engine = ArbEngine(arb_config, portfolio=portfolio)
+
+        # Simulate both legs filling — open the arb pair
+        portfolio.open_arb_pair("test_market", yes_entry=0.45, no_entry=0.50, size=50.0)
+
+        state = create_market_state(self._profitable_book())
+        signals = engine.analyze(state)
+
+        bundle = [s for s in signals if s.opportunity and s.opportunity.is_bundle_arb]
+        assert len(bundle) == 0
+
+    def test_signals_again_after_pair_closed(self, arb_config: ArbConfig):
+        """Engine signals again once the arb pair is resolved and closed."""
+        portfolio = Portfolio(initial_balance=10000.0)
+        engine = ArbEngine(arb_config, portfolio=portfolio)
+
+        portfolio.open_arb_pair("test_market", yes_entry=0.45, no_entry=0.50, size=50.0)
+        portfolio.close_arb_pair("test_market")
+
+        state = create_market_state(self._profitable_book())
+        signals = engine.analyze(state)
+
+        bundle = [s for s in signals if s.opportunity and s.opportunity.is_bundle_arb]
+        assert len(bundle) == 1
 

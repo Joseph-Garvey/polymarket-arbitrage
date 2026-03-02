@@ -2,11 +2,12 @@
 Tests for the Portfolio Module
 """
 
+import logging
 import pytest
 from datetime import datetime
 
 from polymarket_client.models import OrderSide, TokenType, Trade
-from core.portfolio import Portfolio, PortfolioPosition
+from core.portfolio import ArbPairPosition, Portfolio, PortfolioPosition
 
 
 @pytest.fixture
@@ -234,13 +235,80 @@ class TestWinRate:
         assert portfolio.stats.win_rate == 0.5
 
 
+class TestArbPairTracking:
+    """Tests for bundle arb pair lifecycle and PnL semantics."""
+
+    def test_open_arb_pair_records_locked_profit(self, portfolio: Portfolio):
+        """Locked profit equals 1 - total_cost at entry."""
+        pair = portfolio.open_arb_pair("mkt", yes_entry=0.48, no_entry=0.47, size=100.0)
+        assert pair.total_cost == pytest.approx(0.95)
+        assert pair.locked_profit == pytest.approx(0.05)
+
+    def test_open_arb_pair_stored_in_open_dict(self, portfolio: Portfolio):
+        """open_arb_pair adds pair to _open_arb_pairs keyed by market_id."""
+        portfolio.open_arb_pair("mkt", yes_entry=0.48, no_entry=0.47, size=100.0)
+        assert "mkt" in portfolio._open_arb_pairs
+
+    def test_close_arb_pair_moves_to_closed_list(self, portfolio: Portfolio):
+        """close_arb_pair removes from open dict and appends to closed list."""
+        portfolio.open_arb_pair("mkt", yes_entry=0.48, no_entry=0.47, size=100.0)
+        portfolio.close_arb_pair("mkt")
+        assert "mkt" not in portfolio._open_arb_pairs
+        assert len(portfolio._closed_arb_pairs) == 1
+        assert portfolio._closed_arb_pairs[0].status == "closed"
+
+    def test_unrealized_pnl_uses_locked_profit_not_mark_to_market(self, portfolio: Portfolio):
+        """For an arb pair, unrealized PnL == locked_profit * size regardless of prices."""
+        portfolio.update_from_fill(create_trade(
+            token_type=TokenType.YES, side=OrderSide.BUY, price=0.48, size=100.0
+        ))
+        portfolio.update_from_fill(create_trade(
+            trade_id="t2", order_id="o2",
+            token_type=TokenType.NO, side=OrderSide.BUY, price=0.47, size=100.0
+        ))
+        portfolio.open_arb_pair("test_market", yes_entry=0.48, no_entry=0.47, size=100.0)
+
+        # Mid-market prices that would make individual legs show losses
+        portfolio.update_prices("test_market", yes_price=0.48, no_price=0.47)
+
+        # Unrealised PnL should be locked_profit * size = 0.05 * 100 = 5.0
+        assert portfolio.stats.total_unrealized_pnl == pytest.approx(5.0)
+
+    def test_open_arb_pair_warns_when_not_profitable(self, portfolio: Portfolio, caplog):
+        """open_arb_pair logs a warning when total_cost >= 1.0 (no locked profit)."""
+        with caplog.at_level(logging.WARNING, logger="core.portfolio"):
+            portfolio.open_arb_pair("mkt", yes_entry=0.52, no_entry=0.52, size=100.0)
+        assert any("locked_profit" in rec.message.lower() or "not profitable" in rec.message.lower()
+                   for rec in caplog.records)
+
+    def test_arb_win_rate_zero_when_no_closed_pairs(self, portfolio: Portfolio):
+        """arb_win_rate returns 0.0 before any pairs are closed."""
+        assert portfolio.arb_win_rate == 0.0
+
+    def test_arb_win_rate_counts_profitable_resolved_pairs(self, portfolio: Portfolio):
+        """arb_win_rate = fraction of closed pairs with positive locked_profit."""
+        portfolio.open_arb_pair("mkt_win", yes_entry=0.48, no_entry=0.47, size=100.0)  # profit 0.05
+        portfolio.open_arb_pair("mkt_lose", yes_entry=0.52, no_entry=0.52, size=100.0)  # profit -0.04
+        portfolio.close_arb_pair("mkt_win")
+        portfolio.close_arb_pair("mkt_lose")
+        assert portfolio.arb_win_rate == pytest.approx(0.5)
+
+    def test_reset_clears_arb_pairs(self, portfolio: Portfolio):
+        """reset() clears both open and closed arb pair lists."""
+        portfolio.open_arb_pair("mkt", yes_entry=0.48, no_entry=0.47, size=100.0)
+        portfolio.close_arb_pair("mkt")
+        portfolio.reset()
+        assert len(portfolio._open_arb_pairs) == 0
+        assert len(portfolio._closed_arb_pairs) == 0
+
+
 class TestPortfolioSummary:
     """Tests for portfolio summary."""
-    
+
     def test_summary_structure(self, portfolio: Portfolio):
-        """Test summary contains expected fields."""
+        """Test summary contains expected fields including arb_win_rate."""
         summary = portfolio.get_summary()
-        
+
         expected_keys = [
             "initial_balance",
             "cash_balance",
@@ -248,8 +316,9 @@ class TestPortfolioSummary:
             "pnl",
             "total_trades",
             "win_rate",
+            "arb_win_rate",
         ]
-        
+
         for key in expected_keys:
             assert key in summary
     

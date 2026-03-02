@@ -363,6 +363,11 @@ class Portfolio:
         """Record a new bundle arb pair opened at the given entry prices."""
         total_cost = yes_entry + no_entry
         locked_profit = 1.0 - total_cost
+        if locked_profit <= 0:
+            logger.warning(
+                f"Arb pair opened with locked_profit={locked_profit:.4f} (not profitable): "
+                f"{market_id} | yes={yes_entry} no={no_entry} total_cost={total_cost:.4f}"
+            )
         pair = ArbPairPosition(
             market_id=market_id,
             yes_entry=yes_entry,
@@ -432,6 +437,7 @@ class Portfolio:
         filled_legs = sum(1 for o in orders if o.status == OrderStatus.FILLED)
 
         if filled_legs == expected_legs:
+            del self._bundle_signals[signal_id]  # Prune completed entries
             return "complete"
         if filled_legs > 0:
             return "partial"

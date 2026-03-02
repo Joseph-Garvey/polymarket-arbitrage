@@ -350,7 +350,7 @@ class MarketMatcher:
         poly_end = getattr(poly_market, 'end_date', None)
         kalshi_close = getattr(kalshi_market, 'close_time', None)
         if not poly_end or not kalshi_close:
-            return True  # Can't check — allow but a log entry is made at the call site
+            return True  # Can't check — allow silently (caller logs only on rejection)
         delta = abs((poly_end - kalshi_close).days)
         return delta <= 7
 
