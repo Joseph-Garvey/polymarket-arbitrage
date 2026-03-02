@@ -408,6 +408,97 @@ class MarketMatcher:
         
         return combined_sim
     
+    def _precompute_market_data(self, text: str) -> dict:
+        """
+        Pre-compute all expensive text operations for one market.
+
+        Called once per market before the matching loop so comparisons
+        become cheap dict lookups and set operations instead of repeated
+        regex + string work.
+        """
+        text_lower = text.lower()
+        normalized = self.normalize_text(text)
+        tokens = set(normalized.split()) if normalized else set()
+        teams = set(self.extract_teams(text))
+        entities = self.extract_key_entities(text)
+        date = self.extract_date(text)
+
+        persons: set[str] = set()
+        for pattern in [
+            r'\b(trump|biden|harris|desantis|obama|pence)\b',
+            r'\b(musk|zuckerberg|bezos|gates)\b',
+            r'\b(powell|yellen)\b',
+        ]:
+            persons.update(re.findall(pattern, text_lower))
+
+        action_words = set(re.findall(
+            r'\b(win|lose|approve|poll|elect|resign|indicted?|convicted?)\w*\b',
+            text_lower,
+        ))
+
+        sport_kws = {"nfl", "nba", "mlb", "nhl", "football", "basketball", "baseball", "hockey"}
+        crypto_kws = {"bitcoin", "btc", "ethereum", "eth", "solana", "sol"}
+
+        return {
+            "text": text,
+            "text_lower": text_lower,
+            "tokens": tokens,
+            "teams": teams,
+            "entities": entities,
+            "date": date,
+            "persons": persons,
+            "action_words": action_words,
+            "sports": {s for s in sport_kws if s in text_lower},
+            "crypto": {c for c in crypto_kws if c in text_lower},
+        }
+
+    def _fast_similarity(self, poly: dict, kalshi: dict) -> float:
+        """
+        Calculate similarity using pre-computed market data.
+
+        Replaces calculate_similarity() in the batch matching loop.
+        Uses set operations throughout instead of repeated regex/SequenceMatcher.
+        """
+        # 1. Sports: exact team-set match → highest confidence
+        if len(poly["teams"]) >= 2 and len(kalshi["teams"]) >= 2:
+            shared = poly["teams"] & kalshi["teams"]
+            if len(shared) >= 2:
+                return 0.95 if self.dates_match(poly["date"], kalshi["date"]) else 0.3
+            if len(shared) == 1 and self.dates_match(poly["date"], kalshi["date"]):
+                return 0.75
+
+        # 2. Person/politician match
+        shared_persons = poly["persons"] & kalshi["persons"]
+        if shared_persons:
+            if poly["action_words"] & kalshi["action_words"]:
+                return 0.85
+            return 0.6
+
+        # 3. Token Jaccard (replaces SequenceMatcher — O(tokens) vs O(text²))
+        if not poly["tokens"] or not kalshi["tokens"]:
+            return 0.0
+        intersection = poly["tokens"] & kalshi["tokens"]
+        if not intersection:
+            return 0.0  # early exit before any further work
+        text_sim = len(intersection) / len(poly["tokens"] | kalshi["tokens"])
+
+        # 4. Entity overlap bonus
+        if poly["entities"] and kalshi["entities"]:
+            ent_overlap = len(poly["entities"] & kalshi["entities"]) / max(
+                len(poly["entities"]), len(kalshi["entities"])
+            )
+            combined = 0.5 * text_sim + 0.5 * ent_overlap
+        else:
+            combined = text_sim
+
+        # 5. Category-keyword boosts
+        if poly["sports"] & kalshi["sports"]:
+            combined = min(1.0, combined + 0.15)
+        if poly["crypto"] & kalshi["crypto"]:
+            combined = min(1.0, combined + 0.20)
+
+        return combined
+
     def _categorize_market(self, text: str) -> str:
         """Detect category from market text. Order matters - check politics before sports!"""
         text_lower = text.lower()
@@ -510,50 +601,71 @@ class MarketMatcher:
         logger.info(f"(vs {len(active_poly) * len(active_kalshi):,} if matching all-to-all)")
         
         checked = 0
-        
+
         # Match within each category (skip 'other' - too noisy)
         priority_categories = ['sports', 'politics', 'crypto', 'finance', 'entertainment', 'tech']
-        
+
         for category in priority_categories:
             poly_markets = poly_by_cat.get(category, [])
             kalshi_markets_cat = kalshi_by_cat.get(category, [])
-            
+
             if not poly_markets or not kalshi_markets_cat:
                 continue
-            
+
             logger.info(f"Matching {category}: {len(poly_markets)} x {len(kalshi_markets_cat)}")
-            
-            for poly_market in poly_markets:
+
+            # Pre-compute all expensive text operations once per market
+            poly_data = [self._precompute_market_data(m.question) for m in poly_markets]
+            kalshi_data = [self._precompute_market_data(m.title) for m in kalshi_markets_cat]
+
+            # Build team inverted index for sports to skip irrelevant pairs
+            team_index: dict[str, list[int]] = {}
+            if category == 'sports':
+                for idx, kd in enumerate(kalshi_data):
+                    for team in kd["teams"]:
+                        team_index.setdefault(team, []).append(idx)
+
+            for poly_idx, poly_market in enumerate(poly_markets):
+                pd = poly_data[poly_idx]
                 best_match = None
                 best_score = 0.0
-                
-                for kalshi_market in kalshi_markets_cat:
-                    score = self.calculate_similarity(
-                        poly_market.question,
-                        kalshi_market.title
-                    )
-                    
+
+                # Sports: only compare against Kalshi markets sharing a team
+                if category == 'sports' and pd["teams"] and team_index:
+                    candidate_idxs: set[int] = set()
+                    for team in pd["teams"]:
+                        candidate_idxs.update(team_index.get(team, []))
+                    kalshi_candidates = candidate_idxs if candidate_idxs else range(len(kalshi_markets_cat))
+                else:
+                    kalshi_candidates = range(len(kalshi_markets_cat))
+
+                for kalshi_idx in kalshi_candidates:
+                    score = self._fast_similarity(pd, kalshi_data[kalshi_idx])
+
                     if score > best_score:
                         best_score = score
-                        best_match = kalshi_market
-                    
+                        best_match = kalshi_markets_cat[kalshi_idx]
+
                     checked += 1
-                
-                # Yield VERY frequently to keep event loop responsive
+
+                    # No need to keep searching once we hit peak confidence
+                    if best_score >= 0.95:
+                        break
+
+                # Yield to event loop periodically
                 if checked % 500 == 0:
-                    await asyncio.sleep(0.01)  # Small sleep to let web requests through
+                    await asyncio.sleep(0.01)
                     pct = (checked / total_comparisons * 100) if total_comparisons > 0 else 0
-                    
+
                     if checked % 5000 == 0:
                         logger.info(f"Progress: {checked:,}/{total_comparisons:,} ({pct:.1f}%) - {len(matches)} matches")
-                    
+
                     if on_progress:
                         try:
                             on_progress(checked, total_comparisons, len(matches))
-                        except:
+                        except Exception:
                             pass
-                
-                # After checking all Kalshi markets for this Poly market
+
                 if best_match and best_score >= self.min_similarity:
                     pair = MarketPair(
                         polymarket_id=poly_market.market_id,
@@ -565,7 +677,7 @@ class MarketMatcher:
                     )
                     matches.append(pair)
                     self._matched_pairs[pair.pair_id] = pair
-                    
+
                     logger.info(
                         f"MATCHED [{category}]: '{poly_market.question[:35]}...' <-> '{best_match.title[:35]}...' "
                         f"(score: {best_score:.2f})"
