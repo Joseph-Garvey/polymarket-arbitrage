@@ -52,6 +52,10 @@ class ExecutionStats:
     signals_processed: int = 0
     signals_rejected: int = 0
     slippage_rejections: int = 0
+    # Round-trip time from _place_order() call to API response.
+    # Compare against ArbEngine.stats.avg_opportunity_duration_ms:
+    # if avg_execution_latency_ms > avg_opportunity_duration_ms, switch to WebSocket feeds.
+    avg_execution_latency_ms: float = 0.0
 
 
 class ExecutionEngine:
@@ -360,6 +364,7 @@ class ExecutionEngine:
         
         for attempt in range(self.config.max_retries):
             try:
+                _t0 = datetime.utcnow()
                 order = await self.client.place_order(
                     market_id=market_id,
                     token_type=token_type,
@@ -368,12 +373,19 @@ class ExecutionEngine:
                     size=size,
                     strategy_tag=strategy_tag,
                 )
-                
+                latency_ms = (datetime.utcnow() - _t0).total_seconds() * 1000
+                # Running average (Welford-style, safe for first call where orders_placed == 0)
+                n = self.stats.orders_placed + 1
+                self.stats.avg_execution_latency_ms = (
+                    self.stats.avg_execution_latency_ms * (n - 1) / n + latency_ms / n
+                )
+
                 logger.info(
                     f"Order placed: {order.order_id} | "
-                    f"{side.value} {size:.2f} {token_type.value} @ {price:.4f}"
+                    f"{side.value} {size:.2f} {token_type.value} @ {price:.4f} | "
+                    f"latency={latency_ms:.0f}ms"
                 )
-                
+
                 return order
                 
             except Exception as e:

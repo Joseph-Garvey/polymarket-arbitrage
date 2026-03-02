@@ -36,10 +36,11 @@ trading:
   tick_size: 0.01          # Minimum price increment
   mm_enabled: false        # Disabled for real data (markets too efficient)
   
-  # Order sizing - SMALL for $50 budget
-  default_order_size: 3    # $5 per order
-  min_order_size: 1        # $2 minimum
-  max_order_size: 5      # $10 max per order
+  # Order sizing - scaled for $10k dry-run balance
+  # Scale down to default_order_size: 5, min: 2, max: 10 before going live on $50
+  default_order_size: 100  # $100 per order
+  min_order_size: 20       # $20 minimum
+  max_order_size: 500      # $500 max per order
   
   # Execution settings
   slippage_tolerance: 0.02  # Max allowed slippage from signal to execution
@@ -51,9 +52,10 @@ trading:
   estimated_gas_per_order: 0.02  # ~$0.02 gas on Polygon
 
 risk:
-  # Position limits - CONSERVATIVE for $50 budget
-  max_position_per_market: 15    # Max $15 per market
-  max_global_exposure: 50        # Max $50 total (your starting amount!)
+  # Position limits - scaled for $10k dry-run balance
+  # Scale down to max_position_per_market: 15, max_global_exposure: 50 before going live on $50
+  max_position_per_market: 2000  # Max $2000 per market
+  max_global_exposure: 10000     # Max $10000 total
   
   # Loss limits - tight stops
   max_daily_loss: 10             # Stop if losing $10/day
@@ -83,7 +85,7 @@ mode:
   # Cross-platform arbitrage (Polymarket + Kalshi)
   cross_platform_enabled: true    # Enable cross-platform arbitrage detection
   kalshi_enabled: true            # Enable Kalshi market monitoring
-  min_match_similarity: 0.6       # Minimum similarity score for market matching (0-1)
+  min_match_similarity: 0.82      # Minimum similarity score for market matching (0-1)
   
   # Dry run settings
   dry_run_initial_balance: 10000
