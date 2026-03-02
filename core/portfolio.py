@@ -17,6 +17,30 @@ logger = logging.getLogger(__name__)
 
 
 @dataclass
+class ArbPairPosition:
+    """
+    Tracks a bundle arbitrage pair (YES + NO legs) as a single unit.
+
+    Because both legs will show unrealised losses until resolution, tracking
+    them individually makes PnL look negative even when the profit is locked.
+    This dataclass represents the guaranteed outcome correctly.
+    """
+    market_id: str
+    yes_entry: float    # Price paid for YES leg
+    no_entry: float     # Price paid for NO leg
+    size: float
+    total_cost: float   # yes_entry + no_entry (< 1.0 for a profitable bundle long)
+    locked_profit: float  # 1.0 - total_cost (guaranteed at resolution)
+    opened_at: datetime
+    status: str = "open"  # open, resolving, closed
+
+    @property
+    def unrealized_pnl(self) -> float:
+        """Profit is locked at entry for bundle arb — return it unconditionally."""
+        return self.locked_profit * self.size
+
+
+@dataclass
 class PortfolioPosition:
     """Extended position tracking with PnL."""
     market_id: str
@@ -57,16 +81,35 @@ class PortfolioStats:
     winning_trades: int = 0
     losing_trades: int = 0
     total_volume: float = 0.0
-    
+
+    # Closed arb pairs — populated by Portfolio.close_arb_pair()
+    # Stored here so arb_win_rate is accessible from the stats object.
+    _closed_arb_pairs: list = field(default_factory=list)
+
     @property
     def total_pnl(self) -> float:
         return self.total_realized_pnl + self.total_unrealized_pnl
-    
+
     @property
     def win_rate(self) -> float:
+        """
+        Individual-fill win rate.
+
+        NOTE: For bundle arb this will appear near 0% because each leg is
+        "sold below cost" individually until resolution.  Use arb_win_rate
+        instead for strategy-level performance measurement.
+        """
         if self.winning_trades + self.losing_trades == 0:
             return 0.0
         return self.winning_trades / (self.winning_trades + self.losing_trades)
+
+    @property
+    def arb_win_rate(self) -> float:
+        """Percentage of completed arb pairs that resolved profitably."""
+        if not self._closed_arb_pairs:
+            return 0.0
+        winners = sum(1 for p in self._closed_arb_pairs if p.locked_profit > 0)
+        return winners / len(self._closed_arb_pairs)
 
 
 class Portfolio:
@@ -79,19 +122,22 @@ class Portfolio:
     def __init__(self, initial_balance: float = 0.0):
         self.initial_balance = initial_balance
         self.cash_balance = initial_balance
-        
+
         # Positions: market_id -> token_type -> PortfolioPosition
         self._positions: dict[str, dict[TokenType, PortfolioPosition]] = {}
-        
+
+        # Arb pair tracking (open and closed)
+        self._open_arb_pairs: dict[str, ArbPairPosition] = {}
+
         # Trade history
         self._trades: list[Trade] = []
-        
+
         # Stats
         self.stats = PortfolioStats()
-        
+
         # Current prices for unrealized PnL calculation
         self._current_prices: dict[str, dict[TokenType, float]] = {}
-        
+
         logger.info(f"Portfolio initialized with balance: {initial_balance}")
     
     def update_from_fill(self, trade: Trade) -> None:
@@ -232,18 +278,32 @@ class Portfolio:
         self._recalculate_unrealized_pnl()
     
     def _recalculate_unrealized_pnl(self) -> None:
-        """Recalculate total unrealized PnL."""
+        """Recalculate total unrealized PnL.
+
+        For individual legs of a bundle arb, mid-market unrealised PnL will look
+        negative until resolution (both legs cost ~$0.48 and both mark-to-market
+        below that until one resolves to $1).  Open arb pairs instead contribute
+        their locked_profit directly, which is the correct economic value.
+        """
         total = 0.0
-        
+
+        # Markets that belong to an open arb pair — skip their individual legs
+        arb_market_ids = set(self._open_arb_pairs.keys())
+
         for market_id, tokens in self._positions.items():
+            if market_id in arb_market_ids:
+                continue  # Handled below via locked_profit
             if market_id not in self._current_prices:
                 continue
-            
             for token_type, position in tokens.items():
                 if token_type in self._current_prices[market_id]:
                     current_price = self._current_prices[market_id][token_type]
                     total += position.unrealized_pnl(current_price)
-        
+
+        # Add locked profit from open arb pairs
+        for pair in self._open_arb_pairs.values():
+            total += pair.unrealized_pnl
+
         self.stats.total_unrealized_pnl = total
     
     def get_position(self, market_id: str, token_type: TokenType) -> Optional[PortfolioPosition]:
@@ -299,6 +359,34 @@ class Portfolio:
             "net_pnl": self.stats.total_pnl - self.stats.total_fees_paid,
         }
     
+    def open_arb_pair(self, market_id: str, yes_entry: float, no_entry: float, size: float) -> ArbPairPosition:
+        """Record a new bundle arb pair opened at the given entry prices."""
+        total_cost = yes_entry + no_entry
+        locked_profit = 1.0 - total_cost
+        pair = ArbPairPosition(
+            market_id=market_id,
+            yes_entry=yes_entry,
+            no_entry=no_entry,
+            size=size,
+            total_cost=total_cost,
+            locked_profit=locked_profit,
+            opened_at=datetime.utcnow(),
+        )
+        self._open_arb_pairs[market_id] = pair
+        logger.info(
+            f"Arb pair opened: {market_id} | cost={total_cost:.4f} | locked_profit={locked_profit:.4f} | size={size}"
+        )
+        return pair
+
+    def close_arb_pair(self, market_id: str) -> Optional[ArbPairPosition]:
+        """Mark an open arb pair as closed (e.g. on market resolution)."""
+        pair = self._open_arb_pairs.pop(market_id, None)
+        if pair:
+            pair.status = "closed"
+            self.stats._closed_arb_pairs.append(pair)
+            logger.info(f"Arb pair closed: {market_id} | locked_profit={pair.locked_profit:.4f}")
+        return pair
+
     def get_summary(self) -> dict:
         """Get portfolio summary."""
         return {
@@ -308,6 +396,7 @@ class Portfolio:
             "pnl": self.get_pnl(),
             "total_trades": self.stats.total_trades,
             "win_rate": self.stats.win_rate,
+            "arb_win_rate": self.stats.arb_win_rate,
             "total_volume": self.stats.total_volume,
             "positions_count": sum(
                 len(tokens) for tokens in self._positions.values()
@@ -327,6 +416,7 @@ class Portfolio:
         """Reset portfolio to initial state."""
         self._positions = {}
         self._trades = []
+        self._open_arb_pairs = {}
         self.cash_balance = self.initial_balance
         self.stats = PortfolioStats()
         self._current_prices = {}

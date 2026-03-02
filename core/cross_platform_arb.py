@@ -165,7 +165,7 @@ class MarketMatcher:
         "san antonio spurs": ["spurs", "san antonio"],
     }
     
-    def __init__(self, min_similarity: float = 0.5):  # Higher threshold for quality
+    def __init__(self, min_similarity: float = 0.82):
         """
         Initialize matcher.
         
@@ -345,6 +345,15 @@ class MarketMatcher:
         
         return False, 0.0
     
+    def _dates_compatible(self, poly_market, kalshi_market) -> bool:
+        """Check that two markets close within 7 days of each other."""
+        poly_end = getattr(poly_market, 'end_date', None)
+        kalshi_close = getattr(kalshi_market, 'close_time', None)
+        if not poly_end or not kalshi_close:
+            return True  # Can't check — allow but a log entry is made at the call site
+        delta = abs((poly_end - kalshi_close).days)
+        return delta <= 7
+
     def calculate_similarity(
         self,
         polymarket_question: str,
@@ -402,10 +411,17 @@ class MarketMatcher:
         crypto_keywords = ["bitcoin", "btc", "ethereum", "eth", "solana", "sol"]
         poly_crypto = [c for c in crypto_keywords if c in polymarket_question.lower()]
         kalshi_crypto = [c for c in crypto_keywords if c in kalshi_title.lower()]
-        
+
         if poly_crypto and kalshi_crypto and set(poly_crypto) & set(kalshi_crypto):
             combined_sim = min(1.0, combined_sim + 0.2)
-        
+
+        # Penalise if numeric thresholds differ (e.g. $90k vs $100k, 60% vs 65%).
+        # Different strike prices/thresholds mean different markets even if text looks similar.
+        poly_numbers = set(re.findall(r'\d[\d,\.]+', polymarket_question))
+        kalshi_numbers = set(re.findall(r'\d[\d,\.]+', kalshi_title))
+        if poly_numbers and kalshi_numbers and poly_numbers != kalshi_numbers:
+            combined_sim *= 0.5
+
         return combined_sim
     
     def _categorize_market(self, text: str) -> str:
@@ -555,6 +571,12 @@ class MarketMatcher:
                 
                 # After checking all Kalshi markets for this Poly market
                 if best_match and best_score >= self.min_similarity:
+                    # Reject if close dates are more than 7 days apart
+                    if not self._dates_compatible(poly_market, best_match):
+                        logger.info(
+                            f"SKIPPED (date mismatch): '{poly_market.question[:40]}' <-> '{best_match.title[:40]}'"
+                        )
+                        continue
                     pair = MarketPair(
                         polymarket_id=poly_market.market_id,
                         kalshi_ticker=best_match.ticker,

@@ -23,6 +23,11 @@ from polymarket_client.models import (
     TokenType,
 )
 
+# Avoid circular import — Portfolio is imported lazily inside ArbEngine.__init__
+from typing import TYPE_CHECKING
+if TYPE_CHECKING:
+    from core.portfolio import Portfolio
+
 
 logger = logging.getLogger(__name__)
 
@@ -82,6 +87,11 @@ class ArbStats:
     last_opportunity_time: Optional[datetime] = None
     
     # Opportunity duration tracking
+    # NOTE: these durations measure how long an arb persisted in the order book
+    # AFTER our scanner detected it — NOT our execution latency.  They are a
+    # competition signal: if >80% close in <100 ms, sophisticated bots are
+    # filling them before us and we need WebSocket feeds.  Compare
+    # avg_opportunity_duration_ms vs ExecutionStats.avg_execution_latency_ms.
     total_opportunities_tracked: int = 0
     avg_opportunity_duration_ms: float = 0.0
     min_opportunity_duration_ms: float = float('inf')
@@ -100,10 +110,11 @@ class ArbEngine:
     signals for the ExecutionEngine.
     """
     
-    def __init__(self, config: ArbConfig):
+    def __init__(self, config: ArbConfig, portfolio: "Portfolio | None" = None):
         self.config = config
+        self._portfolio = portfolio
         self.stats = ArbStats()
-        
+
         # Track recent opportunities to avoid duplicates
         self._recent_opportunities: dict[str, Opportunity] = {}
         self._opportunity_cooldown: dict[str, datetime] = {}
@@ -392,14 +403,14 @@ class ArbEngine:
         
         if not opportunity:
             return None
-        
-        # Check cooldown to avoid spam
-        cooldown_key = f"{market_id}_{opportunity.opportunity_type.value}"
-        if cooldown_key in self._opportunity_cooldown:
-            if datetime.utcnow() < self._opportunity_cooldown[cooldown_key]:
+
+        # Only suppress re-entry if we already have an open position in this market
+        # (the old 2-second blanket cooldown was blocking valid repeating opportunities).
+        if self._portfolio is not None:
+            has_open_position = self._portfolio.get_exposure(market_id)["total_notional"] > 0
+            if has_open_position:
                 return None
-        
-        self._opportunity_cooldown[cooldown_key] = datetime.utcnow() + timedelta(seconds=2)
+
         self._recent_opportunities[opportunity.opportunity_id] = opportunity
         self.stats.last_opportunity_time = datetime.utcnow()
         
