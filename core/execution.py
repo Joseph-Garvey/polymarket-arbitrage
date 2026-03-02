@@ -19,6 +19,7 @@ from polymarket_client.models import (
     OrderBook,
     OrderSide,
     OrderStatus,
+    OpportunityType,
     Signal,
     TokenType,
     Trade,
@@ -87,10 +88,13 @@ class ExecutionEngine:
         self._orders_by_market: dict[str, list[str]] = {}
         self._orders_by_strategy: dict[str, list[str]] = {}
         
-        # Signal queue
-        self._signal_queue: asyncio.Queue[Signal] = asyncio.Queue()
+        # Signal queue (bounded to prevent unbounded growth under WebSocket load)
+        self._signal_queue: asyncio.Queue[Signal] = asyncio.Queue(maxsize=100)
         self._processing_task: Optional[asyncio.Task] = None
         self._running = False
+
+        # Maps order_id → signal_id for bundle completion tracking
+        self._order_signal_map: dict[str, str] = {}
         
         logger.info(f"ExecutionEngine initialized (dry_run={config.dry_run})")
     
@@ -165,14 +169,11 @@ class ExecutionEngine:
     
     async def _handle_place_orders(self, signal: Signal) -> None:
         """Handle a place_orders signal."""
-        # Validate arb signals are still live before touching the market
         if signal.opportunity and signal.opportunity.is_bundle_arb:
+            # Validate arb is still live before touching the market
             if not await self._validate_arb_still_live(signal):
                 self.stats.signals_rejected += 1
                 return
-
-        # Bundle arb: place all legs simultaneously to avoid leg risk
-        if signal.opportunity and signal.opportunity.is_bundle_arb:
             await self._place_orders_concurrent(signal)
         else:
             # Market-making: sequential is fine
@@ -282,6 +283,11 @@ class ExecutionEngine:
             )
             for order in placed:
                 await self.cancel_order(order.order_id)
+        elif placed:
+            # All legs placed — register for post-fill completion tracking
+            self.portfolio.register_bundle_signal(signal.signal_id, placed)
+            for order in placed:
+                self._order_signal_map[order.order_id] = signal.signal_id
 
     async def _validate_arb_still_live(self, signal: Signal) -> bool:
         """
@@ -302,12 +308,21 @@ class ExecutionEngine:
 
         try:
             current_book = await self.client.get_orderbook(signal.market_id)
-            best_ask_yes = current_book.best_ask_yes or 1.0
-            best_ask_no = current_book.best_ask_no or 1.0
-            current_total_ask = best_ask_yes + best_ask_no
-            if 1.0 - current_total_ask < 0.005:
-                logger.info(f"Arb closed before execution on {signal.market_id}")
-                return False
+            opp_type = opp.opportunity_type
+            if opp_type == OpportunityType.BUNDLE_SHORT:
+                best_bid_yes = current_book.best_bid_yes or 0.0
+                best_bid_no = current_book.best_bid_no or 0.0
+                current_total_bid = best_bid_yes + best_bid_no
+                if current_total_bid - 1.0 < 0.02:
+                    logger.info(f"Bundle short arb closed before execution on {signal.market_id}")
+                    return False
+            else:  # BUNDLE_LONG
+                best_ask_yes = current_book.best_ask_yes or 1.0
+                best_ask_no = current_book.best_ask_no or 1.0
+                current_total_ask = best_ask_yes + best_ask_no
+                if 1.0 - current_total_ask < 0.02:
+                    logger.info(f"Bundle long arb closed before execution on {signal.market_id}")
+                    return False
             return True
         except Exception:
             return False  # Don't trade if we can't verify
@@ -501,14 +516,30 @@ class ExecutionEngine:
             order = self._open_orders[order_id]
             order.filled_size += trade.size
             order.updated_at = datetime.utcnow()
-            
+
             if order.remaining_size <= 0:
                 order.status = OrderStatus.FILLED
                 self._untrack_order(order_id)
                 self.stats.orders_filled += 1
+
+                # Check bundle completion to detect partial fills
+                signal_id = self._order_signal_map.get(order_id)
+                if signal_id:
+                    completion = self.portfolio.check_bundle_completion(signal_id)
+                    if completion == "partial":
+                        logger.warning(
+                            f"Partial bundle arb fill for signal {signal_id} on "
+                            f"{trade.market_id} — one leg filled, other pending"
+                        )
+                    elif completion == "complete":
+                        # Clean up mapping entries for this signal
+                        stale = [oid for oid, sid in self._order_signal_map.items()
+                                 if sid == signal_id]
+                        for oid in stale:
+                            del self._order_signal_map[oid]
             else:
                 order.status = OrderStatus.PARTIALLY_FILLED
-        
+
         # Update portfolio
         self.portfolio.update_from_fill(trade)
 

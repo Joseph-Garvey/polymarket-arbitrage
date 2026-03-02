@@ -129,7 +129,7 @@ class TradingBot:
             default_order_size=self.config.trading.default_order_size,
             min_order_size=self.config.trading.min_order_size,
             max_order_size=self.config.trading.max_order_size,
-        ))
+        ), portfolio=self.portfolio)
         
         # Initialize data feed
         market_ids = self.config.trading.markets.copy()
