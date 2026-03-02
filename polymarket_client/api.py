@@ -131,11 +131,7 @@ class PolymarketClient(BasePolymarketClient):
         
         # HTTP client
         self._http_client: Optional[httpx.AsyncClient] = None
-        
-        # WebSocket connection
-        self._ws_connection = None
-        self._ws_subscriptions: set[str] = set()
-        
+
         # Simulated state for dry run
         self._simulated_orders: dict[str, Order] = {}
         self._simulated_positions: dict[str, dict[TokenType, Position]] = {}
@@ -154,8 +150,13 @@ class PolymarketClient(BasePolymarketClient):
     async def connect(self) -> None:
         """Initialize HTTP client."""
         self._http_client = httpx.AsyncClient(
-            timeout=self.timeout,
+            timeout=httpx.Timeout(self.timeout, connect=5.0),
             headers=self._get_headers(),
+            limits=httpx.Limits(
+                max_connections=50,
+                max_keepalive_connections=20,
+                keepalive_expiry=30,
+            ),
         )
         logger.info(f"Polymarket client connected (dry_run={self.dry_run})")
     
@@ -164,9 +165,6 @@ class PolymarketClient(BasePolymarketClient):
         if self._http_client:
             await self._http_client.aclose()
             self._http_client = None
-        if self._ws_connection:
-            await self._ws_connection.close()
-            self._ws_connection = None
         logger.info("Polymarket client disconnected")
     
     def _get_headers(self) -> dict[str, str]:
@@ -468,68 +466,92 @@ class PolymarketClient(BasePolymarketClient):
     async def get_orderbook(self, market_id: str) -> OrderBook:
         """
         Fetch current order book for a market.
-        
+
         Uses Polymarket CLOB API:
-        GET https://clob.polymarket.com/book?token_id={token_id}
+        POST https://clob.polymarket.com/books
         """
         # Get market to find token IDs
         market = await self.get_market(market_id)
-        
+
         if not market.yes_token_id or not market.no_token_id:
             logger.warning(f"No token IDs for market {market_id}")
             return OrderBook(market_id=market_id, timestamp=datetime.utcnow())
-        
-        # Fetch REAL order books from CLOB API
-        yes_book = await self._fetch_token_orderbook(market.yes_token_id, TokenType.YES)
-        no_book = await self._fetch_token_orderbook(market.no_token_id, TokenType.NO)
-        
+
+        # Fetch both token books in a single /books call
+        books = await self._fetch_token_orderbooks_batch(
+            [market.yes_token_id, market.no_token_id]
+        )
+
+        yes_book = self._parse_token_orderbook(
+            books.get(market.yes_token_id, {}), TokenType.YES
+        )
+        no_book = self._parse_token_orderbook(
+            books.get(market.no_token_id, {}), TokenType.NO
+        )
+
         return OrderBook(
             market_id=market_id,
             yes=yes_book,
             no=no_book,
             timestamp=datetime.utcnow(),
         )
-    
+
+    async def _fetch_token_orderbooks_batch(self, token_ids: list[str]) -> dict[str, dict]:
+        """
+        Fetch order books for multiple tokens in a single CLOB API call.
+
+        POST https://clob.polymarket.com/books
+        Body: [{"token_id": "..."}, ...]
+        Returns: dict mapping token_id -> raw book data
+        """
+        if not token_ids:
+            return {}
+        payload = [{"token_id": tid} for tid in token_ids]
+        data = await self._request(
+            "POST",
+            "/books",
+            json_data=payload,
+            base_url=self.rest_url,
+        )
+        result = {}
+        if isinstance(data, list):
+            if len(data) != len(token_ids):
+                logger.debug(f"/books returned {len(data)} entries for {len(token_ids)} requested tokens")
+            requested = set(token_ids)
+            for book_data in data:
+                if not isinstance(book_data, dict):
+                    continue
+                tid = book_data.get("asset_id") or book_data.get("token_id")
+                if tid and tid in requested:
+                    result[tid] = book_data
+        return result
+
+    def _parse_token_orderbook(self, data: dict, token_type: TokenType) -> TokenOrderBook:
+        """Parse raw CLOB book data into a TokenOrderBook."""
+        bids = []
+        asks = []
+        bids_raw = sorted(data.get("bids", []), key=lambda x: float(x.get("price", 0)), reverse=True)[:10]
+        asks_raw = sorted(data.get("asks", []), key=lambda x: float(x.get("price", 0)))[:10]
+        for bid in bids_raw:
+            bids.append(PriceLevel(
+                price=float(bid.get("price", 0)),
+                size=float(bid.get("size", 0)),
+            ))
+        for ask in asks_raw:
+            asks.append(PriceLevel(
+                price=float(ask.get("price", 0)),
+                size=float(ask.get("size", 0)),
+            ))
+        return TokenOrderBook(
+            token_type=token_type,
+            bids=OrderBookSide(levels=bids),
+            asks=OrderBookSide(levels=asks),
+        )
+
     async def _fetch_token_orderbook(self, token_id: str, token_type: TokenType) -> TokenOrderBook:
-        """Fetch order book for a single token from CLOB API."""
-        try:
-            data = await self._request(
-                "GET",
-                "/book",
-                params={"token_id": token_id},
-                base_url=self.rest_url,
-            )
-            
-            # Parse bids and asks
-            bids = []
-            asks = []
-            
-            for bid in data.get("bids", [])[:10]:
-                bids.append(PriceLevel(
-                    price=float(bid.get("price", 0)),
-                    size=float(bid.get("size", 0)),
-                ))
-            
-            for ask in data.get("asks", [])[:10]:
-                asks.append(PriceLevel(
-                    price=float(ask.get("price", 0)),
-                    size=float(ask.get("size", 0)),
-                ))
-            
-            return TokenOrderBook(
-                token_type=token_type,
-                bids=OrderBookSide(levels=bids),
-                asks=OrderBookSide(levels=asks),
-            )
-            
-        except Exception as e:
-            logger.warning(f"Failed to fetch orderbook for token {token_id}: {e}")
-            # Return empty book
-            return TokenOrderBook(
-                token_type=token_type,
-                bids=OrderBookSide(levels=[]),
-                asks=OrderBookSide(levels=[]),
-            )
+        """Fetch order book for a single token (wraps batch method)."""
+        books = await self._fetch_token_orderbooks_batch([token_id])
+        return self._parse_token_orderbook(books.get(token_id, {}), token_type)
     
     def _generate_simulated_orderbook(self, market_id: str) -> OrderBook:
         """Generate a simulated order book for testing."""
@@ -582,96 +604,161 @@ class PolymarketClient(BasePolymarketClient):
     async def stream_orderbook(self, market_ids: list[str], use_simulation: bool = False) -> AsyncIterator[tuple[str, OrderBook]]:
         """
         Stream order book updates.
-        
+
         If use_simulation=True, generates simulated data with opportunities.
-        Otherwise fetches REAL data from Polymarket CLOB API.
+        Otherwise subscribes to the Polymarket CLOB WebSocket for real-time updates.
         """
         if use_simulation:
             async for item in self._stream_simulated_orderbooks(market_ids):
                 yield item
             return
-        
-        logger.info(f"Starting REAL orderbook stream for {len(market_ids)} markets")
-        
-        # We already have token IDs in the cached markets - use them directly!
-        # Build token map from cached market data (no extra API calls needed)
+
+        async for item in self._stream_ws_orderbooks(market_ids):
+            yield item
+
+    async def _stream_ws_orderbooks(self, market_ids: list[str]) -> AsyncIterator[tuple[str, OrderBook]]:
+        """
+        Subscribe to Polymarket CLOB WebSocket and stream order book updates.
+
+        Maintains live bid/ask state per token and yields a full OrderBook for
+        the affected market on every snapshot or delta message received.
+        Reconnects automatically with exponential backoff on disconnection.
+        """
+        # Build token <-> market maps from cache
         market_tokens: dict[str, tuple[str, str]] = {}
-        
+        token_to_market: dict[str, tuple[str, TokenType]] = {}
+
         for market_id in market_ids:
-            if market_id in self._markets_cache:
-                market = self._markets_cache[market_id]
-                if market.yes_token_id and market.no_token_id:
-                    market_tokens[market_id] = (market.yes_token_id, market.no_token_id)
-        
-        logger.info(f"Have token IDs for {len(market_tokens)} markets (from cache)")
-        
+            market = self._markets_cache.get(market_id)
+            if market and market.yes_token_id and market.no_token_id:
+                market_tokens[market_id] = (market.yes_token_id, market.no_token_id)
+                token_to_market[market.yes_token_id] = (market_id, TokenType.YES)
+                token_to_market[market.no_token_id] = (market_id, TokenType.NO)
+
         if not market_tokens:
-            logger.warning("No markets with valid token IDs found!")
+            logger.warning("No markets with valid token IDs found in cache!")
             return
-        
-        # Settings for processing large market counts
-        active_batch_size = 500  # Process 500 markets per rotation
-        markets_per_request_batch = 20  # Fetch 20 at a time within the active batch
-        request_delay = 0.05  # 50ms between API calls
-        batch_delay = 0.3  # 300ms between request batches
-        rotation_delay = 2.0  # 2 seconds before rotating to next 500
-        
-        market_list = list(market_tokens.keys())
-        total_markets = len(market_list)
-        current_offset = 0
-        
-        logger.info(f"Will rotate through {total_markets} markets, {active_batch_size} at a time")
-        
-        try:
-            while True:
-                # Get current batch of 500 markets
-                end_offset = min(current_offset + active_batch_size, total_markets)
-                active_markets = market_list[current_offset:end_offset]
-                
-                logger.info(f"Processing markets {current_offset+1}-{end_offset} of {total_markets}")
-                
-                # Process this batch
-                for i in range(0, len(active_markets), markets_per_request_batch):
-                    request_batch = active_markets[i:i + markets_per_request_batch]
-                    
-                    for market_id in request_batch:
+
+        all_token_ids = list(token_to_market.keys())
+        logger.info(f"Starting WebSocket stream: {len(market_tokens)} markets, {len(all_token_ids)} tokens")
+
+        # Live state: token_id -> {"bids": {price: size}, "asks": {price: size}}
+        live_books: dict[str, dict[str, dict[float, float]]] = {}
+
+        backoff = 1.0
+        subscribe_chunk = 500  # tokens per subscribe message
+
+        while True:
+            live_books.clear()  # discard stale state; server will re-send book snapshots
+            try:
+                async with websockets.connect(
+                    self.ws_url,
+                    ping_interval=20,
+                    ping_timeout=10,  # Tighter than the 20s default; stale connections should fail fast
+                    max_size=4 * 1024 * 1024,  # 4MB; default 1MB is too small for full book snapshots
+                ) as ws:
+                    # Subscribe to all tokens in chunks
+                    for i in range(0, len(all_token_ids), subscribe_chunk):
+                        # "assets_ids" is the documented CLOB WS field name (Polymarket CLOB API)
+                        await ws.send(json.dumps({
+                            "assets_ids": all_token_ids[i:i + subscribe_chunk],
+                            "type": "subscribe",
+                        }))
+
+                    logger.info("WebSocket connected and subscribed")
+
+                    got_first_message = False
+                    async for raw in ws:
                         try:
-                            yes_token, no_token = market_tokens[market_id]
-                            
-                            # Fetch REAL order books from CLOB API
-                            yes_book = await self._fetch_token_orderbook(yes_token, TokenType.YES)
-                            no_book = await self._fetch_token_orderbook(no_token, TokenType.NO)
-                            
-                            orderbook = OrderBook(
-                                market_id=market_id,
-                                yes=yes_book,
-                                no=no_book,
-                                timestamp=datetime.utcnow(),
-                            )
-                            
-                            yield (market_id, orderbook)
-                            await asyncio.sleep(request_delay)
-                            
-                        except Exception as e:
-                            # Silently skip errors - don't spam logs
+                            msg = json.loads(raw)
+                        except json.JSONDecodeError:
                             continue
-                    
-                    await asyncio.sleep(batch_delay)
-                
-                # Move to next batch of 500
-                current_offset = end_offset
-                if current_offset >= total_markets:
-                    current_offset = 0  # Start over from beginning
-                    logger.info("Completed full market cycle, starting over...")
-                
-                await asyncio.sleep(rotation_delay)
-                
-        except asyncio.CancelledError:
-            logger.info("Orderbook stream cancelled")
-            raise
-        except Exception as e:
-            logger.error(f"Orderbook stream error: {e}")
-            raise
+                        try:
+                            event_type = msg.get("event_type")
+                            asset_id = msg.get("asset_id")
+
+                            if not asset_id or asset_id not in token_to_market:
+                                continue
+
+                            if asset_id not in live_books:
+                                live_books[asset_id] = {"bids": {}, "asks": {}}
+
+                            book = live_books[asset_id]
+
+                            if event_type == "book":
+                                # Full snapshot — replace state entirely
+                                book["bids"] = {
+                                    float(b["price"]): float(b["size"])
+                                    for b in msg.get("bids", [])
+                                }
+                                book["asks"] = {
+                                    float(a["price"]): float(a["size"])
+                                    for a in msg.get("asks", [])
+                                }
+                            elif event_type == "price_change":
+                                # Delta — apply each change; size "0" removes the level
+                                for change in msg.get("changes", []):
+                                    raw_side = change.get("side", "")
+                                    if not raw_side:
+                                        logger.warning("price_change missing 'side' field, skipping")
+                                        continue
+                                    price = float(change["price"])
+                                    size = float(change["size"])
+                                    side_key = "bids" if raw_side.upper() == "BUY" else "asks"
+                                    if size == 0:
+                                        book[side_key].pop(price, None)
+                                    else:
+                                        book[side_key][price] = size
+                            else:
+                                continue
+
+                            if not got_first_message:
+                                got_first_message = True
+                                backoff = 1.0
+
+                            market_id, _ = token_to_market[asset_id]
+                            yes_token, no_token = market_tokens[market_id]
+
+                            yield (market_id, OrderBook(
+                                market_id=market_id,
+                                yes=self._build_token_orderbook_from_state(
+                                    live_books.get(yes_token, {"bids": {}, "asks": {}}),
+                                    TokenType.YES,
+                                ),
+                                no=self._build_token_orderbook_from_state(
+                                    live_books.get(no_token, {"bids": {}, "asks": {}}),
+                                    TokenType.NO,
+                                ),
+                                timestamp=datetime.utcnow(),
+                            ))
+                        except Exception as e:
+                            logger.warning(f"Error processing WS message: {e}")
+                            continue
+
+            except asyncio.CancelledError:
+                logger.info("WebSocket orderbook stream cancelled")
+                raise
+            except ConnectionClosed as e:
+                logger.warning(f"WebSocket closed: {e}, reconnecting in {backoff}s...")
+            except Exception as e:
+                logger.warning(f"WebSocket error: {e}, reconnecting in {backoff}s...")
+
+            await asyncio.sleep(backoff)
+            backoff = min(backoff * 2, 60)
+
+    def _build_token_orderbook_from_state(
+        self,
+        state: dict[str, dict[float, float]],
+        token_type: TokenType,
+    ) -> TokenOrderBook:
+        """Build a TokenOrderBook from a live price-level state dict."""
+        bids = sorted(state["bids"].items(), reverse=True)[:10]
+        asks = sorted(state["asks"].items())[:10]
+        return TokenOrderBook(
+            token_type=token_type,
+            bids=OrderBookSide(levels=[PriceLevel(price=p, size=s) for p, s in bids]),
+            asks=OrderBookSide(levels=[PriceLevel(price=p, size=s) for p, s in asks]),
+        )
     
     async def _stream_simulated_orderbooks(self, market_ids: list[str]) -> AsyncIterator[tuple[str, OrderBook]]:
         """Generate simulated order books with occasional arbitrage opportunities."""
@@ -698,35 +785,6 @@ class PolymarketClient(BasePolymarketClient):
             logger.info("Simulated orderbook stream cancelled")
             raise
 
-    async def _connect_websocket(self, market_ids: list[str]) -> None:
-        """
-        Connect to Polymarket WebSocket.
-        
-        TODO: Implement actual WebSocket connection and subscription.
-        """
-        try:
-            self._ws_connection = await websockets.connect(
-                self.ws_url,
-                ping_interval=30,
-                ping_timeout=10,
-            )
-            
-            # Subscribe to markets
-            for market_id in market_ids:
-                subscribe_msg = json.dumps({
-                    "type": "subscribe",
-                    "market": market_id,
-                    "channel": "book",
-                })
-                await self._ws_connection.send(subscribe_msg)
-                self._ws_subscriptions.add(market_id)
-            
-            logger.info(f"WebSocket connected, subscribed to {len(market_ids)} markets")
-            
-        except Exception as e:
-            logger.error(f"WebSocket connection failed: {e}")
-            raise
-    
     async def get_positions(self) -> dict[str, dict[TokenType, Position]]:
         """
         Get all current positions.
