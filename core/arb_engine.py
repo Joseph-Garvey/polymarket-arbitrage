@@ -117,6 +117,8 @@ class ArbEngine:
 
         # Track recent opportunities to avoid duplicates
         self._recent_opportunities: dict[str, Opportunity] = {}
+        # Cooldown used exclusively for market-making signals (not bundle arb;
+        # bundle arb re-entry is gated by open-position check via self._portfolio).
         self._opportunity_cooldown: dict[str, datetime] = {}
         
         # Track active opportunities for duration measurement
@@ -439,7 +441,6 @@ class ArbEngine:
                 f"Bundle SHORT opportunity: {market_id} | "
                 f"total_bid={total_bid:.4f} | gross={gross_edge_short:.4f} | "
                 f"fees={fee_cost_short:.4f} | NET edge={edge:.4f} | size={suggested_size:.2f}"
-                f"total_bid={total_bid:.4f} | edge={edge:.4f} | size={suggested_size:.2f}"
             )
         
         if not opportunity:

@@ -511,15 +511,36 @@ class ExecutionEngine:
         
         # Update portfolio
         self.portfolio.update_from_fill(trade)
-        
+
+        # If both legs of a bundle arb BUY are now filled, record the locked profit.
+        # This enables correct PnL and prevents the kill switch from false-firing.
+        if getattr(trade, "strategy_tag", "") == "bundle_arb" and trade.side == OrderSide.BUY:
+            self._maybe_open_arb_pair(trade.market_id)
+
         # Update risk manager
         self.risk_manager.update_from_fill(trade)
-        
+
         logger.info(
             f"Fill: {trade.trade_id} | "
             f"{trade.side.value} {trade.size:.2f} {trade.token_type.value} @ {trade.price:.4f}"
         )
     
+    def _maybe_open_arb_pair(self, market_id: str) -> None:
+        """Open an arb pair on the portfolio once both YES and NO legs are filled."""
+        if market_id in self.portfolio._open_arb_pairs:
+            return  # Already tracking this pair
+
+        yes_pos = self.portfolio.get_position(market_id, TokenType.YES)
+        no_pos = self.portfolio.get_position(market_id, TokenType.NO)
+
+        if yes_pos and no_pos and yes_pos.size > 0 and no_pos.size > 0:
+            self.portfolio.open_arb_pair(
+                market_id=market_id,
+                yes_entry=yes_pos.avg_entry_price,
+                no_entry=no_pos.avg_entry_price,
+                size=min(yes_pos.size, no_pos.size),
+            )
+
     def get_open_orders(self, market_id: Optional[str] = None) -> list[Order]:
         """Get all open orders, optionally filtered by market."""
         if market_id:

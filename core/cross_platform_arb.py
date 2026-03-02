@@ -466,6 +466,9 @@ class MarketMatcher:
             "action_words": action_words,
             "sports": {s for s in sport_kws if s in text_lower},
             "crypto": {c for c in crypto_kws if c in text_lower},
+            # Numeric thresholds (e.g. $90k, 60%, 100000) — used to penalise
+            # pairs that share keywords but have different strike prices/levels.
+            "numbers": set(re.findall(r'\d[\d,\.]+', text)),
         }
 
     def _fast_similarity(self, poly: dict, kalshi: dict) -> float:
@@ -512,6 +515,10 @@ class MarketMatcher:
             combined = min(1.0, combined + 0.15)
         if poly["crypto"] & kalshi["crypto"]:
             combined = min(1.0, combined + 0.20)
+
+        # 6. Numeric-threshold penalty — different strike prices mean different markets
+        if poly["numbers"] and kalshi["numbers"] and poly["numbers"] != kalshi["numbers"]:
+            combined *= 0.5
 
         return combined
 

@@ -82,10 +82,6 @@ class PortfolioStats:
     losing_trades: int = 0
     total_volume: float = 0.0
 
-    # Closed arb pairs — populated by Portfolio.close_arb_pair()
-    # Stored here so arb_win_rate is accessible from the stats object.
-    _closed_arb_pairs: list = field(default_factory=list)
-
     @property
     def total_pnl(self) -> float:
         return self.total_realized_pnl + self.total_unrealized_pnl
@@ -96,20 +92,12 @@ class PortfolioStats:
         Individual-fill win rate.
 
         NOTE: For bundle arb this will appear near 0% because each leg is
-        "sold below cost" individually until resolution.  Use arb_win_rate
+        "sold below cost" individually until resolution.  Use Portfolio.arb_win_rate
         instead for strategy-level performance measurement.
         """
         if self.winning_trades + self.losing_trades == 0:
             return 0.0
         return self.winning_trades / (self.winning_trades + self.losing_trades)
-
-    @property
-    def arb_win_rate(self) -> float:
-        """Percentage of completed arb pairs that resolved profitably."""
-        if not self._closed_arb_pairs:
-            return 0.0
-        winners = sum(1 for p in self._closed_arb_pairs if p.locked_profit > 0)
-        return winners / len(self._closed_arb_pairs)
 
 
 class Portfolio:
@@ -128,6 +116,7 @@ class Portfolio:
 
         # Arb pair tracking (open and closed)
         self._open_arb_pairs: dict[str, ArbPairPosition] = {}
+        self._closed_arb_pairs: list[ArbPairPosition] = []
 
         # Trade history
         self._trades: list[Trade] = []
@@ -362,6 +351,14 @@ class Portfolio:
             "net_pnl": self.stats.total_pnl - self.stats.total_fees_paid,
         }
     
+    @property
+    def arb_win_rate(self) -> float:
+        """Percentage of completed arb pairs that resolved profitably."""
+        if not self._closed_arb_pairs:
+            return 0.0
+        winners = sum(1 for p in self._closed_arb_pairs if p.locked_profit > 0)
+        return winners / len(self._closed_arb_pairs)
+
     def open_arb_pair(self, market_id: str, yes_entry: float, no_entry: float, size: float) -> ArbPairPosition:
         """Record a new bundle arb pair opened at the given entry prices."""
         total_cost = yes_entry + no_entry
@@ -386,7 +383,7 @@ class Portfolio:
         pair = self._open_arb_pairs.pop(market_id, None)
         if pair:
             pair.status = "closed"
-            self.stats._closed_arb_pairs.append(pair)
+            self._closed_arb_pairs.append(pair)
             logger.info(f"Arb pair closed: {market_id} | locked_profit={pair.locked_profit:.4f}")
         return pair
 
@@ -399,7 +396,7 @@ class Portfolio:
             "pnl": self.get_pnl(),
             "total_trades": self.stats.total_trades,
             "win_rate": self.stats.win_rate,
-            "arb_win_rate": self.stats.arb_win_rate,
+            "arb_win_rate": self.arb_win_rate,
             "total_volume": self.stats.total_volume,
             "positions_count": sum(
                 len(tokens) for tokens in self._positions.values()
@@ -445,6 +442,7 @@ class Portfolio:
         self._positions = {}
         self._trades = []
         self._open_arb_pairs = {}
+        self._closed_arb_pairs = []
         self.cash_balance = self.initial_balance
         self.stats = PortfolioStats()
         self._current_prices = {}

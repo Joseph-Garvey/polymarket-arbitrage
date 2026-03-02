@@ -57,8 +57,8 @@ risk:
   max_position_per_market: 2000  # Max $2000 per market
   max_global_exposure: 10000     # Max $10000 total
   
-  # Loss limits - tight stops
-  max_daily_loss: 10             # Stop if losing $10/day
+  # Loss limits - scaled for $10k dry-run (scale down to $10 before going live on $50)
+  max_daily_loss: 500            # Stop if losing $500/day (5% of 10k)
   max_drawdown_pct: 0.15         # 15% max drawdown from peak
   
   # Market filters - DISABLED for testing (volume data comes from Gamma API)
