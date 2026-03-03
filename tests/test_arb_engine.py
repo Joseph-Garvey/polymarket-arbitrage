@@ -468,3 +468,185 @@ class TestPortfolioAwareCooldown:
         bundle = [s for s in signals if s.opportunity and s.opportunity.is_bundle_arb]
         assert len(bundle) == 1
 
+
+class TestMultilegReEntryGuard:
+    """Tests for the _active_opportunities re-entry guard in multileg arb."""
+
+    def _multileg_only_state(self, market_id: str, group_id: str) -> "MarketState":
+        """
+        Create a state with YES ask=0.40, NO ask=0.62 so:
+          - total_ask = 1.02  => NO bundle long
+          - total_bid = 0.95  => NO bundle short
+          - two markets' YES asks sum to 0.80 => 20% gross multileg edge
+        """
+        order_book = create_order_book(
+            market_id=market_id,
+            yes_bid=0.37,
+            yes_ask=0.40,
+            no_bid=0.58,
+            no_ask=0.62,
+            size=200.0,
+        )
+        return MarketState(
+            market=Market(
+                market_id=market_id,
+                condition_id=market_id,
+                question="Test Market",
+                active=True,
+                volume_24h=50000.0,
+                group_id=group_id,
+            ),
+            order_book=order_book,
+        )
+
+    def test_multileg_guard_suppresses_second_signal_same_tick(self, arb_config: ArbConfig):
+        """
+        After a MULTILEG_LONG signal is emitted, subsequent ticks to any member
+        market must NOT emit another signal while the opportunity is still active.
+        """
+        engine = ArbEngine(arb_config)
+        group_id = "guard_test_group"
+
+        state_a = self._multileg_only_state("guard_market_a", group_id)
+        state_b = self._multileg_only_state("guard_market_b", group_id)
+
+        # Seed the group
+        engine.analyze(state_a, bankroll=1000.0)
+
+        # First full analysis — should produce 1 multileg signal
+        signals1 = engine.analyze(state_b, bankroll=1000.0)
+        ml1 = [s for s in signals1 if s.opportunity and
+               s.opportunity.opportunity_type == OpportunityType.MULTILEG_LONG]
+        assert len(ml1) == 1, f"Expected 1 signal on first analysis, got {len(ml1)}"
+
+        # Second tick to market_a — prices unchanged, opportunity still active.
+        # The guard must suppress a second signal.
+        signals2 = engine.analyze(state_a, bankroll=1000.0)
+        ml2 = [s for s in signals2 if s.opportunity and
+               s.opportunity.opportunity_type == OpportunityType.MULTILEG_LONG]
+        assert len(ml2) == 0, (
+            f"Re-entry guard failed: got {len(ml2)} MULTILEG_LONG signal(s) "
+            "on second tick while opportunity is still active"
+        )
+
+    def test_multileg_guard_suppresses_on_different_member_market(self, arb_config: ArbConfig):
+        """
+        The guard must fire even when the second tick comes from a different
+        member market of the same group (not the one that triggered the first signal).
+        """
+        engine = ArbEngine(arb_config)
+        group_id = "guard_test_group_2"
+
+        state_c = self._multileg_only_state("guard_market_c", group_id)
+        state_d = self._multileg_only_state("guard_market_d", group_id)
+
+        # Seed group then trigger first signal via state_d
+        engine.analyze(state_c, bankroll=1000.0)
+        signals1 = engine.analyze(state_d, bankroll=1000.0)
+        ml1 = [s for s in signals1 if s.opportunity and
+               s.opportunity.opportunity_type == OpportunityType.MULTILEG_LONG]
+        assert len(ml1) == 1, f"Expected 1 initial multileg signal, got {len(ml1)}"
+
+        # Subsequent tick to state_c (the OTHER member market) — still guarded
+        signals2 = engine.analyze(state_c, bankroll=1000.0)
+        ml2 = [s for s in signals2 if s.opportunity and
+               s.opportunity.opportunity_type == OpportunityType.MULTILEG_LONG]
+        assert len(ml2) == 0, (
+            f"Re-entry guard failed for alternate member market tick: "
+            f"got {len(ml2)} MULTILEG_LONG signal(s)"
+        )
+
+    def test_multileg_guard_releases_after_expiry(self, arb_config: ArbConfig):
+        """
+        After the active opportunity is evicted from _active_opportunities,
+        a subsequent tick must be able to fire a new signal.
+        This is verified by manually clearing the entry (simulating expiry).
+        """
+        engine = ArbEngine(arb_config)
+        group_id = "guard_test_group_3"
+
+        state_e = self._multileg_only_state("guard_market_e", group_id)
+        state_f = self._multileg_only_state("guard_market_f", group_id)
+
+        # Seed and fire first signal
+        engine.analyze(state_e, bankroll=1000.0)
+        signals1 = engine.analyze(state_f, bankroll=1000.0)
+        ml1 = [s for s in signals1 if s.opportunity and
+               s.opportunity.opportunity_type == OpportunityType.MULTILEG_LONG]
+        assert len(ml1) == 1, f"Expected 1 initial multileg signal, got {len(ml1)}"
+
+        # Simulate expiry: manually remove the active opportunity entry
+        multileg_key = f"{group_id}_multileg_long"
+        assert multileg_key in engine._active_opportunities, (
+            "Expected active opportunities to contain the multileg key"
+        )
+        del engine._active_opportunities[multileg_key]
+
+        # Now another tick should fire again since the guard is gone
+        signals2 = engine.analyze(state_e, bankroll=1000.0)
+        ml2 = [s for s in signals2 if s.opportunity and
+               s.opportunity.opportunity_type == OpportunityType.MULTILEG_LONG]
+        assert len(ml2) == 1, (
+            f"Expected 1 new multileg signal after expiry, got {len(ml2)}"
+        )
+
+    def test_multileg_expiry_check_evicts_when_prices_move(self, arb_config: ArbConfig):
+        """
+        When prices move so that multileg is no longer profitable, the
+        _check_expired_opportunities should evict the active entry, allowing
+        the guard to release.
+        """
+        engine = ArbEngine(arb_config)
+        group_id = "guard_test_group_4"
+
+        state_g = self._multileg_only_state("guard_market_g", group_id)
+        state_h = self._multileg_only_state("guard_market_h", group_id)
+
+        # Seed and fire first signal
+        engine.analyze(state_g, bankroll=1000.0)
+        signals1 = engine.analyze(state_h, bankroll=1000.0)
+        ml1 = [s for s in signals1 if s.opportunity and
+               s.opportunity.opportunity_type == OpportunityType.MULTILEG_LONG]
+        assert len(ml1) == 1
+
+        multileg_key = f"{group_id}_multileg_long"
+        assert multileg_key in engine._active_opportunities
+
+        # Now update both group states to prices with no multileg edge
+        # (YES ask = 0.52 per leg => total = 1.04, no arb)
+        def _no_edge_state(market_id: str) -> "MarketState":
+            order_book = create_order_book(
+                market_id=market_id,
+                yes_bid=0.50,
+                yes_ask=0.52,
+                no_bid=0.46,
+                no_ask=0.48,
+                size=200.0,
+            )
+            return MarketState(
+                market=Market(
+                    market_id=market_id,
+                    condition_id=market_id,
+                    question="Test Market",
+                    active=True,
+                    volume_24h=50000.0,
+                    group_id=group_id,
+                ),
+                order_book=order_book,
+            )
+
+        no_edge_g = _no_edge_state("guard_market_g")
+        no_edge_h = _no_edge_state("guard_market_h")
+
+        # Update group states so expiry check sees the new prices
+        engine._group_states[group_id]["guard_market_g"] = no_edge_g
+        engine._group_states[group_id]["guard_market_h"] = no_edge_h
+
+        # Trigger expiry check via analyze on one of the member markets
+        engine.analyze(no_edge_g, bankroll=1000.0)
+
+        # The active opportunity should now be evicted
+        assert multileg_key not in engine._active_opportunities, (
+            "Expected multileg active opportunity to be evicted after prices moved"
+        )
+

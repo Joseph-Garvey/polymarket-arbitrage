@@ -172,12 +172,18 @@ class ArbEngine:
             # Skip if bundle_signal was already generated for this market — a 2-market
             # NegRisk group would otherwise emit both BUNDLE_LONG and MULTILEG_LONG for
             # the same legs, doubling the exposure.
+            # Also skip if we are already tracking an active multileg opportunity for
+            # this group — without this guard every WebSocket tick to any member market
+            # would call _check_multileg_arbitrage(), generating hundreds of signals per
+            # minute and creating signal-queue back-pressure.
             if group_id and len(self._group_states[group_id]) > 1 and bundle_signal is None:
-                multileg_signal = self._check_multileg_arbitrage(
-                    group_id, self._group_states[group_id], bankroll
-                )
-                if multileg_signal:
-                    signals.append(multileg_signal)
+                multileg_key = f"{group_id}_multileg_long"
+                if multileg_key not in self._active_opportunities:
+                    multileg_signal = self._check_multileg_arbitrage(
+                        group_id, self._group_states[group_id], bankroll
+                    )
+                    if multileg_signal:
+                        signals.append(multileg_signal)
 
         # Check for market-making opportunities
         if self.config.mm_enabled:
@@ -193,8 +199,21 @@ class ArbEngine:
         now = datetime.utcnow()
         expired_keys = []
 
+        # Determine which group_ids this market_id belongs to, so we can also
+        # evaluate multileg opportunities whose timing.market_id is the group_id.
+        groups_for_market: set[str] = {
+            gid
+            for gid, members in self._group_states.items()
+            if market_id in members
+        }
+
         for key, timing in self._active_opportunities.items():
-            if timing.market_id != market_id:
+            is_multileg = "multileg_long" in timing.opportunity_type
+            # For bundle entries: only check when the triggering market matches.
+            # For multileg entries: check when any member market of that group fires.
+            if not is_multileg and timing.market_id != market_id:
+                continue
+            if is_multileg and timing.market_id not in groups_for_market:
                 continue
 
             # Check if opportunity still exists
@@ -214,6 +233,24 @@ class ArbEngine:
                 if order_book.best_bid_yes and order_book.best_bid_no:
                     total_bid = order_book.best_bid_yes + order_book.best_bid_no
                     if total_bid - 1.0 >= self.config.min_edge * 0.5:
+                        still_valid = True
+
+            elif is_multileg:
+                # For multileg, timing.market_id IS the group_id.
+                # The opportunity is still live if the sum of YES asks across all
+                # legs in the group is still < 1.0 (using a relaxed threshold,
+                # consistent with the bundle checks above).
+                group_id_ml = timing.market_id
+                if group_id_ml in self._group_states:
+                    total_yes_ask = 0.0
+                    all_valid = True
+                    for state in self._group_states[group_id_ml].values():
+                        ask_yes = state.order_book.best_ask_yes
+                        if ask_yes is None:
+                            all_valid = False
+                            break
+                        total_yes_ask += ask_yes
+                    if all_valid and 1.0 - total_yes_ask >= self.config.min_edge * 0.5:
                         still_valid = True
 
             # Also expire if too old (10 seconds max)
