@@ -16,7 +16,7 @@ from polymarket_client.models import (
     OpportunityType,
 )
 from core.arb_engine import ArbEngine, ArbConfig
-from core.portfolio import Portfolio
+from core.portfolio import GroupArbLeg, Portfolio
 
 
 @pytest.fixture
@@ -319,8 +319,15 @@ class TestPortfolioAwareCooldown:
         portfolio = Portfolio(initial_balance=10000.0)
         engine = ArbEngine(arb_config, portfolio=portfolio)
 
-        # Simulate both legs filling — open the arb pair
-        portfolio.open_arb_pair("test_market", yes_entry=0.45, no_entry=0.50, size=50.0)
+        # Simulate both legs filling — open the group arb position
+        portfolio.open_group_position(
+            "test_market",
+            [
+                GroupArbLeg("test_market", TokenType.YES, 0.45, 50.0),
+                GroupArbLeg("test_market", TokenType.NO, 0.50, 50.0),
+            ],
+            50.0,
+        )
 
         state = create_market_state(self._profitable_book())
         signals = engine.analyze(state)
@@ -333,8 +340,15 @@ class TestPortfolioAwareCooldown:
         portfolio = Portfolio(initial_balance=10000.0)
         engine = ArbEngine(arb_config, portfolio=portfolio)
 
-        portfolio.open_arb_pair("test_market", yes_entry=0.45, no_entry=0.50, size=50.0)
-        portfolio.close_arb_pair("test_market")
+        portfolio.open_group_position(
+            "test_market",
+            [
+                GroupArbLeg("test_market", TokenType.YES, 0.45, 50.0),
+                GroupArbLeg("test_market", TokenType.NO, 0.50, 50.0),
+            ],
+            50.0,
+        )
+        portfolio.close_group_position("test_market")
 
         state = create_market_state(self._profitable_book())
         signals = engine.analyze(state)

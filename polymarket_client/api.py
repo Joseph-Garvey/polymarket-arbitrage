@@ -378,6 +378,14 @@ class PolymarketClient(BasePolymarketClient):
             outcomes_str = data.get("outcomes", "")
             # Parse outcome prices - JSON string like '[0.65, 0.35]'
             outcome_prices_str = data.get("outcomePrices", "")
+            price = 0.0
+            if outcome_prices_str:
+                try:
+                    prices = json.loads(outcome_prices_str)
+                    if isinstance(prices, list) and len(prices) > 0:
+                        price = float(prices[0])
+                except (json.JSONDecodeError, TypeError, ValueError):
+                    pass
 
             group_id = ""
             events = data.get("events", [])
@@ -403,6 +411,7 @@ class PolymarketClient(BasePolymarketClient):
                 ),
                 category=data.get("category", "") or "",
                 group_id=group_id,
+                price=price,
             )
         except Exception as e:
             logger.warning(f"Failed to parse market: {e}")
