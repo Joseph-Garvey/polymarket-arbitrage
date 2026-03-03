@@ -185,14 +185,21 @@ class ArbEngine:
             # this group — without this guard every WebSocket tick to any member market
             # would call _check_multileg_arbitrage(), generating hundreds of signals per
             # minute and creating signal-queue back-pressure.
+            # Also skip if group_size is set and we have not yet seen all expected legs
+            # — a partial group view means we cannot confirm the arbitrage is risk-free.
             if group_id and group_id in self._group_states and len(self._group_states[group_id]) > 1 and bundle_signal is None:
-                multileg_key = f"{group_id}_multileg_long"
-                if multileg_key not in self._active_opportunities:
-                    multileg_signal = self._check_multileg_arbitrage(
-                        group_id, self._group_states[group_id], bankroll
-                    )
-                    if multileg_signal:
-                        signals.append(multileg_signal)
+                group_states_now = self._group_states[group_id]
+                expected_legs = market_state.market.group_size
+                if expected_legs > 0 and len(group_states_now) < expected_legs:
+                    pass  # Partial group — wait until all legs are observed
+                else:
+                    multileg_key = f"{group_id}_multileg_long"
+                    if multileg_key not in self._active_opportunities:
+                        multileg_signal = self._check_multileg_arbitrage(
+                            group_id, group_states_now, bankroll
+                        )
+                        if multileg_signal:
+                            signals.append(multileg_signal)
 
         # Check for market-making opportunities
         if self.config.mm_enabled:
