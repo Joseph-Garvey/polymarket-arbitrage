@@ -25,16 +25,17 @@ logger = logging.getLogger(__name__)
 @dataclass
 class MarketPair:
     """A matched pair of markets on Polymarket and Kalshi."""
+
     polymarket_id: str
     kalshi_ticker: str
     polymarket_question: str
     kalshi_title: str
     similarity_score: float
     category: str = ""
-    
+
     # Timestamps
     matched_at: datetime = field(default_factory=datetime.utcnow)
-    
+
     @property
     def pair_id(self) -> str:
         """Unique identifier for this pair."""
@@ -44,34 +45,35 @@ class MarketPair:
 @dataclass
 class CrossPlatformOpportunity:
     """Arbitrage opportunity between Polymarket and Kalshi."""
+
     opportunity_id: str
     market_pair: MarketPair
-    
+
     # Direction: which platform to buy/sell on
     buy_platform: str  # "polymarket" or "kalshi"
     sell_platform: str
     token: str  # "YES" or "NO"
-    
+
     # Prices
     buy_price: float
     sell_price: float
-    
+
     # Edge calculation
     gross_edge: float  # sell_price - buy_price
-    net_edge: float    # After fees
-    edge_pct: float    # As percentage
-    
+    net_edge: float  # After fees
+    edge_pct: float  # As percentage
+
     # Sizing
     suggested_size: float = 0.0
     max_size: float = 0.0  # Limited by liquidity on both sides
-    
+
     # Liquidity available
     buy_liquidity: float = 0.0
     sell_liquidity: float = 0.0
-    
+
     # Metadata
     detected_at: datetime = field(default_factory=datetime.utcnow)
-    
+
     def __str__(self) -> str:
         return (
             f"CrossPlatformArb: Buy {self.token} on {self.buy_platform} @ ${self.buy_price:.3f}, "
@@ -83,18 +85,39 @@ class CrossPlatformOpportunity:
 class MarketMatcher:
     """
     Matches similar markets between Polymarket and Kalshi.
-    
+
     Uses text similarity, keyword matching, and sports-specific logic
     to find markets that represent the same underlying prediction.
     """
-    
+
     # Keywords to normalize/remove for matching
     NOISE_WORDS = {
-        "will", "the", "a", "an", "be", "to", "in", "on", "by", "at",
-        "what", "who", "which", "when", "is", "are", "was", "were",
-        "market", "prediction", "bet", "odds", "win", "winner"
+        "will",
+        "the",
+        "a",
+        "an",
+        "be",
+        "to",
+        "in",
+        "on",
+        "by",
+        "at",
+        "what",
+        "who",
+        "which",
+        "when",
+        "is",
+        "are",
+        "was",
+        "were",
+        "market",
+        "prediction",
+        "bet",
+        "odds",
+        "win",
+        "winner",
     }
-    
+
     # NFL team name mappings (full name -> abbreviations and variants)
     NFL_TEAMS = {
         "arizona cardinals": ["cardinals", "arizona", "ari"],
@@ -130,7 +153,7 @@ class MarketMatcher:
         "tennessee titans": ["titans", "tennessee", "ten"],
         "washington commanders": ["commanders", "washington", "was"],
     }
-    
+
     # NBA teams
     NBA_TEAMS = {
         "boston celtics": ["celtics", "boston"],
@@ -164,37 +187,37 @@ class MarketMatcher:
         "new orleans pelicans": ["pelicans", "new orleans"],
         "san antonio spurs": ["spurs", "san antonio"],
     }
-    
+
     def __init__(self, min_similarity: float = 0.82):
         """
         Initialize matcher.
-        
+
         Args:
             min_similarity: Minimum similarity score (0-1) to consider a match
         """
         self.min_similarity = min_similarity
         self._matched_pairs: dict[str, MarketPair] = {}
-        
+
         # Build reverse lookup for team names
         self._team_lookup = {}
         for full_name, variants in {**self.NFL_TEAMS, **self.NBA_TEAMS}.items():
             self._team_lookup[full_name] = full_name
             for variant in variants:
                 self._team_lookup[variant.lower()] = full_name
-    
+
     def normalize_text(self, text: str) -> str:
         """Normalize text for comparison."""
         text = text.lower()
-        text = re.sub(r'[^\w\s]', ' ', text)
+        text = re.sub(r"[^\w\s]", " ", text)
         words = text.split()
         words = [w for w in words if w not in self.NOISE_WORDS]
-        return ' '.join(words)
-    
+        return " ".join(words)
+
     def extract_teams(self, text: str) -> list[str]:
         """Extract team names from text."""
         text_lower = text.lower()
         found_teams = []
-        
+
         # Check for team names (longest match first)
         for team_key in sorted(self._team_lookup.keys(), key=len, reverse=True):
             if team_key in text_lower:
@@ -203,103 +226,137 @@ class MarketMatcher:
                     found_teams.append(canonical)
                     # Remove from text to avoid double matches
                     text_lower = text_lower.replace(team_key, "")
-        
+
         return found_teams
-    
+
     def extract_key_entities(self, text: str) -> set[str]:
         """Extract key entities (names, numbers, dates) from text."""
         entities = set()
-        
+
         # Numbers and percentages
-        entities.update(re.findall(r'\d+(?:\.\d+)?%?', text))
-        
+        entities.update(re.findall(r"\d+(?:\.\d+)?%?", text))
+
         # Capitalized words (likely names/entities)
-        entities.update(re.findall(r'\b[A-Z][a-z]+(?:\s+[A-Z][a-z]+)*\b', text))
-        
+        entities.update(re.findall(r"\b[A-Z][a-z]+(?:\s+[A-Z][a-z]+)*\b", text))
+
         # Political terms
-        political_terms = ["trump", "biden", "republican", "democrat", "gop", "dnc", "harris", "desantis", "election", "president"]
+        political_terms = [
+            "trump",
+            "biden",
+            "republican",
+            "democrat",
+            "gop",
+            "dnc",
+            "harris",
+            "desantis",
+            "election",
+            "president",
+        ]
         for term in political_terms:
             if term in text.lower():
                 entities.add(term)
-        
+
         # Crypto terms
         crypto_terms = ["bitcoin", "btc", "ethereum", "eth", "crypto", "solana", "sol"]
         for term in crypto_terms:
             if term in text.lower():
                 entities.add(term)
-        
+
         return entities
-    
+
     def extract_date(self, text: str) -> Optional[str]:
         """
         Extract date from text for event matching.
-        
+
         Returns normalized date string like "2024-12-08" or None.
         """
         text_lower = text.lower()
-        
+
         # Month names
         months = {
-            'jan': '01', 'january': '01', 'feb': '02', 'february': '02',
-            'mar': '03', 'march': '03', 'apr': '04', 'april': '04',
-            'may': '05', 'jun': '06', 'june': '06', 'jul': '07', 'july': '07',
-            'aug': '08', 'august': '08', 'sep': '09', 'september': '09',
-            'oct': '10', 'october': '10', 'nov': '11', 'november': '11',
-            'dec': '12', 'december': '12'
+            "jan": "01",
+            "january": "01",
+            "feb": "02",
+            "february": "02",
+            "mar": "03",
+            "march": "03",
+            "apr": "04",
+            "april": "04",
+            "may": "05",
+            "jun": "06",
+            "june": "06",
+            "jul": "07",
+            "july": "07",
+            "aug": "08",
+            "august": "08",
+            "sep": "09",
+            "september": "09",
+            "oct": "10",
+            "october": "10",
+            "nov": "11",
+            "november": "11",
+            "dec": "12",
+            "december": "12",
         }
-        
+
         # Pattern: "Sep 8", "September 8", "Sep 8, 2024"
         for month_name, month_num in months.items():
-            pattern = rf'{month_name}\.?\s+(\d{{1,2}})(?:,?\s+(\d{{4}}))?'
+            pattern = rf"{month_name}\.?\s+(\d{{1,2}})(?:,?\s+(\d{{4}}))?"
             match = re.search(pattern, text_lower)
             if match:
                 day = match.group(1).zfill(2)
-                year = match.group(2) or '2024'  # Default to current year
+                year = match.group(2) or "2024"  # Default to current year
                 return f"{year}-{month_num}-{day}"
-        
+
         # Pattern: "12/8/24", "12-8-2024"
-        match = re.search(r'(\d{1,2})[/-](\d{1,2})[/-](\d{2,4})', text)
+        match = re.search(r"(\d{1,2})[/-](\d{1,2})[/-](\d{2,4})", text)
         if match:
             month = match.group(1).zfill(2)
             day = match.group(2).zfill(2)
             year = match.group(3)
             if len(year) == 2:
-                year = '20' + year
+                year = "20" + year
             return f"{year}-{month}-{day}"
-        
+
         return None
-    
+
     def dates_match(self, date1: Optional[str], date2: Optional[str]) -> bool:
         """Check if two dates are the same or within 1 day."""
         if not date1 or not date2:
             return True  # If no dates, don't penalize
         return date1 == date2
-    
+
     def is_sports_match(self, text1: str, text2: str) -> tuple[bool, float]:
         """
         Check if two texts refer to the same sports matchup.
-        
+
         Returns:
             (is_match, confidence_score)
         """
         teams1 = self.extract_teams(text1)
         teams2 = self.extract_teams(text2)
-        
+
         if len(teams1) >= 2 and len(teams2) >= 2:
             # Check if same two teams
             teams1_set = set(teams1[:2])
             teams2_set = set(teams2[:2])
-            
+
             if teams1_set == teams2_set:
                 # Also check dates match
                 date1 = self.extract_date(text1)
                 date2 = self.extract_date(text2)
-                
+
                 if self.dates_match(date1, date2):
-                    return True, 0.95  # Very high confidence for exact team + date match
+                    return (
+                        True,
+                        0.95,
+                    )  # Very high confidence for exact team + date match
                 else:
-                    return False, 0.3  # Same teams but different dates - likely different games
-            
+                    return (
+                        False,
+                        0.3,
+                    )  # Same teams but different dates - likely different games
+
             # Check if at least one team matches (and dates match)
             overlap = teams1_set & teams2_set
             if len(overlap) >= 1:
@@ -307,48 +364,58 @@ class MarketMatcher:
                 date2 = self.extract_date(text2)
                 if self.dates_match(date1, date2):
                     return True, 0.7 + (0.2 * len(overlap) / 2)
-        
+
         return False, 0.0
-    
+
     def is_same_person_event(self, text1: str, text2: str) -> tuple[bool, float]:
         """
         Check if two texts refer to the same person-related prediction.
-        
+
         Examples:
         - "Will Trump win?" / "Trump wins 2024" -> True, 0.85
         - "Trump approval rating" / "Trump job approval" -> True, 0.8
         """
         # Extract key person names
         person_patterns = [
-            r'\b(trump|biden|harris|desantis|obama|pence)\b',
-            r'\b(musk|zuckerberg|bezos|gates)\b',
-            r'\b(powell|yellen)\b',  # Fed chairs
+            r"\b(trump|biden|harris|desantis|obama|pence)\b",
+            r"\b(musk|zuckerberg|bezos|gates)\b",
+            r"\b(powell|yellen)\b",  # Fed chairs
         ]
-        
+
         persons1 = set()
         persons2 = set()
-        
+
         for pattern in person_patterns:
             persons1.update(re.findall(pattern, text1.lower()))
             persons2.update(re.findall(pattern, text2.lower()))
-        
+
         if persons1 and persons2 and persons1 & persons2:
             # Same person mentioned - check context similarity
             # Extract action/event words
-            action_words1 = set(re.findall(r'\b(win|lose|approve|poll|elect|resign|indicted?|convicted?)\w*\b', text1.lower()))
-            action_words2 = set(re.findall(r'\b(win|lose|approve|poll|elect|resign|indicted?|convicted?)\w*\b', text2.lower()))
-            
+            action_words1 = set(
+                re.findall(
+                    r"\b(win|lose|approve|poll|elect|resign|indicted?|convicted?)\w*\b",
+                    text1.lower(),
+                )
+            )
+            action_words2 = set(
+                re.findall(
+                    r"\b(win|lose|approve|poll|elect|resign|indicted?|convicted?)\w*\b",
+                    text2.lower(),
+                )
+            )
+
             if action_words1 & action_words2:
                 return True, 0.85  # Same person + same type of prediction
             else:
                 return True, 0.6  # Same person, different prediction type
-        
+
         return False, 0.0
-    
+
     def _dates_compatible(self, poly_market, kalshi_market) -> bool:
         """Check that two markets close within 7 days of each other."""
-        poly_end = getattr(poly_market, 'end_date', None)
-        kalshi_close = getattr(kalshi_market, 'close_time', None)
+        poly_end = getattr(poly_market, "end_date", None)
+        kalshi_close = getattr(kalshi_market, "close_time", None)
         if not poly_end or not kalshi_close:
             return True  # Can't check — allow silently (caller logs only on rejection)
         delta = abs((poly_end - kalshi_close).days)
@@ -361,52 +428,67 @@ class MarketMatcher:
     ) -> float:
         """
         Calculate similarity score between two market questions.
-        
+
         Uses multiple matching strategies:
         1. Sports team + date matching
         2. Person/politician matching
         3. Fuzzy text similarity
         4. Entity overlap
-        
+
         Returns:
             Float between 0 and 1
         """
         # First check for sports matchup (highest priority)
-        is_sports, sports_score = self.is_sports_match(polymarket_question, kalshi_title)
+        is_sports, sports_score = self.is_sports_match(
+            polymarket_question, kalshi_title
+        )
         if is_sports and sports_score > 0.7:
             return sports_score
-        
+
         # Check for same person/event predictions
-        is_person, person_score = self.is_same_person_event(polymarket_question, kalshi_title)
+        is_person, person_score = self.is_same_person_event(
+            polymarket_question, kalshi_title
+        )
         if is_person and person_score > 0.7:
             return person_score
-        
+
         # Normalize texts
         norm_poly = self.normalize_text(polymarket_question)
         norm_kalshi = self.normalize_text(kalshi_title)
-        
+
         # Base text similarity using SequenceMatcher (fuzzy matching)
         text_sim = SequenceMatcher(None, norm_poly, norm_kalshi).ratio()
-        
+
         # Entity overlap bonus
         poly_entities = self.extract_key_entities(polymarket_question)
         kalshi_entities = self.extract_key_entities(kalshi_title)
-        
+
         if poly_entities and kalshi_entities:
-            entity_overlap = len(poly_entities & kalshi_entities) / max(len(poly_entities), len(kalshi_entities))
+            entity_overlap = len(poly_entities & kalshi_entities) / max(
+                len(poly_entities), len(kalshi_entities)
+            )
             # Weighted combination
             combined_sim = 0.5 * text_sim + 0.5 * entity_overlap
         else:
             combined_sim = text_sim
-        
+
         # Boost if both mention same sport type
-        sport_keywords = ["nfl", "nba", "mlb", "nhl", "football", "basketball", "baseball", "hockey"]
+        sport_keywords = [
+            "nfl",
+            "nba",
+            "mlb",
+            "nhl",
+            "football",
+            "basketball",
+            "baseball",
+            "hockey",
+        ]
         poly_sports = [s for s in sport_keywords if s in polymarket_question.lower()]
         kalshi_sports = [s for s in sport_keywords if s in kalshi_title.lower()]
-        
+
         if poly_sports and kalshi_sports and set(poly_sports) & set(kalshi_sports):
             combined_sim = min(1.0, combined_sim + 0.15)
-        
+
         # Boost for crypto predictions mentioning same coin
         crypto_keywords = ["bitcoin", "btc", "ethereum", "eth", "solana", "sol"]
         poly_crypto = [c for c in crypto_keywords if c in polymarket_question.lower()]
@@ -417,13 +499,13 @@ class MarketMatcher:
 
         # Penalise if numeric thresholds differ (e.g. $90k vs $100k, 60% vs 65%).
         # Different strike prices/thresholds mean different markets even if text looks similar.
-        poly_numbers = set(re.findall(r'\d[\d,\.]+', polymarket_question))
-        kalshi_numbers = set(re.findall(r'\d[\d,\.]+', kalshi_title))
+        poly_numbers = set(re.findall(r"\d[\d,\.]+", polymarket_question))
+        kalshi_numbers = set(re.findall(r"\d[\d,\.]+", kalshi_title))
         if poly_numbers and kalshi_numbers and poly_numbers != kalshi_numbers:
             combined_sim *= 0.5
 
         return combined_sim
-    
+
     def _precompute_market_data(self, text: str) -> dict:
         """
         Pre-compute all expensive text operations for one market.
@@ -441,18 +523,29 @@ class MarketMatcher:
 
         persons: set[str] = set()
         for pattern in [
-            r'\b(trump|biden|harris|desantis|obama|pence)\b',
-            r'\b(musk|zuckerberg|bezos|gates)\b',
-            r'\b(powell|yellen)\b',
+            r"\b(trump|biden|harris|desantis|obama|pence)\b",
+            r"\b(musk|zuckerberg|bezos|gates)\b",
+            r"\b(powell|yellen)\b",
         ]:
             persons.update(re.findall(pattern, text_lower))
 
-        action_words = set(re.findall(
-            r'\b(win|lose|approve|poll|elect|resign|indicted?|convicted?)\w*\b',
-            text_lower,
-        ))
+        action_words = set(
+            re.findall(
+                r"\b(win|lose|approve|poll|elect|resign|indicted?|convicted?)\w*\b",
+                text_lower,
+            )
+        )
 
-        sport_kws = {"nfl", "nba", "mlb", "nhl", "football", "basketball", "baseball", "hockey"}
+        sport_kws = {
+            "nfl",
+            "nba",
+            "mlb",
+            "nhl",
+            "football",
+            "basketball",
+            "baseball",
+            "hockey",
+        }
         crypto_kws = {"bitcoin", "btc", "ethereum", "eth", "solana", "sol"}
 
         return {
@@ -468,7 +561,7 @@ class MarketMatcher:
             "crypto": {c for c in crypto_kws if c in text_lower},
             # Numeric thresholds (e.g. $90k, 60%, 100000) — used to penalise
             # pairs that share keywords but have different strike prices/levels.
-            "numbers": set(re.findall(r'\d[\d,\.]+', text)),
+            "numbers": set(re.findall(r"\d[\d,\.]+", text)),
         }
 
     def _fast_similarity(self, poly: dict, kalshi: dict) -> float:
@@ -517,7 +610,11 @@ class MarketMatcher:
             combined = min(1.0, combined + 0.20)
 
         # 6. Numeric-threshold penalty — different strike prices mean different markets
-        if poly["numbers"] and kalshi["numbers"] and poly["numbers"] != kalshi["numbers"]:
+        if (
+            poly["numbers"]
+            and kalshi["numbers"]
+            and poly["numbers"] != kalshi["numbers"]
+        ):
             combined *= 0.5
 
         return combined
@@ -525,108 +622,268 @@ class MarketMatcher:
     def _categorize_market(self, text: str) -> str:
         """Detect category from market text. Order matters - check politics before sports!"""
         text_lower = text.lower()
-        
+
         # Politics FIRST (to avoid "win the election" matching sports)
-        if any(x in text_lower for x in ['trump', 'biden', 'harris', 'president', 'election', 
-            'democrat', 'republican', 'congress', 'senate', 'governor', 'mayor', 'vote', 
-            'nominee', 'primary', 'presidential', 'prime minister', 'parliament']):
-            return 'politics'
-        
+        if any(
+            x in text_lower
+            for x in [
+                "trump",
+                "biden",
+                "harris",
+                "president",
+                "election",
+                "democrat",
+                "republican",
+                "congress",
+                "senate",
+                "governor",
+                "mayor",
+                "vote",
+                "nominee",
+                "primary",
+                "presidential",
+                "prime minister",
+                "parliament",
+            ]
+        ):
+            return "politics"
+
         # Crypto
-        if any(x in text_lower for x in ['bitcoin', 'btc', 'ethereum', 'eth', 'crypto', 'token',
-            'solana', 'sol', 'blockchain', 'defi', 'nft', 'fdv', 'market cap']):
-            return 'crypto'
-        
-        # Finance/Economics  
-        if any(x in text_lower for x in ['fed', 'interest rate', 'inflation', 'gdp', 'recession',
-            'stock', 'nasdaq', 'dow', 's&p', 'treasury', 'tariff', 'federal reserve']):
-            return 'finance'
-        
+        if any(
+            x in text_lower
+            for x in [
+                "bitcoin",
+                "btc",
+                "ethereum",
+                "eth",
+                "crypto",
+                "token",
+                "solana",
+                "sol",
+                "blockchain",
+                "defi",
+                "nft",
+                "fdv",
+                "market cap",
+            ]
+        ):
+            return "crypto"
+
+        # Finance/Economics
+        if any(
+            x in text_lower
+            for x in [
+                "fed",
+                "interest rate",
+                "inflation",
+                "gdp",
+                "recession",
+                "stock",
+                "nasdaq",
+                "dow",
+                "s&p",
+                "treasury",
+                "tariff",
+                "federal reserve",
+            ]
+        ):
+            return "finance"
+
         # Sports (check AFTER politics)
-        sports_keywords = ['nfl', 'nba', 'mlb', 'nhl', 'premier league', 'champions league', 
-            'super bowl', 'playoff', 'la liga', 'soccer', ' fc', 'basketball team', 
-            'football team', 'hockey', 'world cup', 'stanley cup']
+        sports_keywords = [
+            "nfl",
+            "nba",
+            "mlb",
+            "nhl",
+            "premier league",
+            "champions league",
+            "super bowl",
+            "playoff",
+            "la liga",
+            "soccer",
+            " fc",
+            "basketball team",
+            "football team",
+            "hockey",
+            "world cup",
+            "stanley cup",
+        ]
         if any(x in text_lower for x in sports_keywords):
-            return 'sports'
-        
-        # Check for team names
-        if any(x in text_lower for x in self._team_lookup.keys()):
-            return 'sports'
-        
+            return "sports"
+
+        # Check for team names — skip short abbreviations (2-3 chars like "ne", "no",
+        # "sf", "gb") that cause false positives via substring matching ("next",
+        # "information", etc.).  Full city/nickname keys (len >= 4) are specific enough.
+        if any(x in text_lower for x in self._team_lookup.keys() if len(x) >= 4):
+            return "sports"
+
         # Entertainment
-        if any(x in text_lower for x in ['oscar', 'grammy', 'emmy', 'movie', 'film', 'album',
-            'artist', 'actor', 'actress', 'netflix', 'spotify', 'best picture']):
-            return 'entertainment'
-        
+        if any(
+            x in text_lower
+            for x in [
+                "oscar",
+                "grammy",
+                "emmy",
+                "movie",
+                "film",
+                "album",
+                "artist",
+                "actor",
+                "actress",
+                "netflix",
+                "spotify",
+                "best picture",
+            ]
+        ):
+            return "entertainment"
+
         # Tech
-        if any(x in text_lower for x in ['ai ', 'openai', 'gpt', 'google', 'apple', 'microsoft',
-            'tesla', 'spacex', 'nvidia']):
-            return 'tech'
-        
-        return 'other'
-    
+        if any(
+            x in text_lower
+            for x in [
+                "ai ",
+                "openai",
+                "gpt",
+                "google",
+                "apple",
+                "microsoft",
+                "tesla",
+                "spacex",
+                "nvidia",
+            ]
+        ):
+            return "tech"
+
+        return "other"
+
+    # Maps Kalshi API category strings to our internal category names
+    KALSHI_CATEGORY_MAP: dict[str, str] = {
+        "sports": "sports",
+        "elections": "politics",
+        "politics": "politics",
+        "economics": "finance",
+        "financials": "finance",
+        "finance": "finance",
+        "crypto": "crypto",
+        "cryptocurrency": "crypto",
+        "tech": "tech",
+        "technology": "tech",
+        "entertainment": "entertainment",
+    }
+
+    @staticmethod
+    def _is_multi_outcome_title(title: str) -> bool:
+        """
+        Return True if the Kalshi title is a comma-joined list of outcomes
+        (e.g. "yes Kawhi Leonard: 1+,yes Alperen Sengun: 1+,...").
+
+        Such titles cannot be meaningfully compared to a binary Polymarket
+        question, so the market should be excluded from matching.
+        """
+        return bool(re.search(r"yes\s+\w[^,]*,\s*yes\s+\w", title, re.IGNORECASE))
+
+    def _kalshi_category(self, market) -> str:
+        """
+        Return the normalised category for a Kalshi market.
+
+        Prefers the platform's own category field over text classification
+        so that politics/crypto/finance markets are not swallowed by the
+        sports bucket (which happens when `_categorize_market` runs on
+        garbled player-prop titles).
+        """
+        native = (market.category or "").lower().strip()
+        if native in self.KALSHI_CATEGORY_MAP:
+            return self.KALSHI_CATEGORY_MAP[native]
+        # Fall back to text classification only for markets without a usable
+        # native category (e.g. category == "" or "other").
+        return self._categorize_market(market.title)
+
     async def find_matches(
         self,
         polymarket_markets: list[Market],
         kalshi_markets: list,  # list[KalshiMarket]
-        on_progress: callable = None,  # Callback for progress updates
+        on_progress=None,  # Callback for progress updates
     ) -> list[MarketPair]:
         """
         Find matching markets between platforms using category-based matching.
-        
+
         Args:
             polymarket_markets: List of Polymarket markets
             kalshi_markets: List of Kalshi markets
             on_progress: Optional callback(checked, total, matches_found) for live updates
-            
+
         Returns:
             List of matched market pairs
         """
         import asyncio
-        
+
         matches = []
-        
+
         # Get all active markets
         active_poly = [m for m in polymarket_markets if m.active]
-        active_kalshi = [m for m in kalshi_markets if m.is_active]
-        
+        # Exclude Kalshi markets whose title is a garbled multi-outcome list
+        # (e.g. "yes Kawhi Leonard: 1+,yes Derrick White: 1+,...") — these
+        # cannot be meaningfully compared to a binary Polymarket question.
+        active_kalshi = [
+            m
+            for m in kalshi_markets
+            if m.is_active and not self._is_multi_outcome_title(m.title)
+        ]
+        logger.info(
+            f"Kalshi: {len(active_kalshi)} matchable markets "
+            f"({len(kalshi_markets) - len(active_kalshi)} excluded: "
+            f"{sum(1 for m in kalshi_markets if m.is_active and self._is_multi_outcome_title(m.title))} "
+            f"multi-outcome titles)"
+        )
+
         # Group by category for faster matching
         logger.info("Categorizing markets for faster matching...")
-        
+
         poly_by_cat: dict[str, list] = {}
         for m in active_poly:
             cat = self._categorize_market(m.question)
             if cat not in poly_by_cat:
                 poly_by_cat[cat] = []
             poly_by_cat[cat].append(m)
-        
+
         kalshi_by_cat: dict[str, list] = {}
         for m in active_kalshi:
-            cat = self._categorize_market(m.title)
+            # Use native Kalshi category rather than text-classifying the title
+            cat = self._kalshi_category(m)
             if cat not in kalshi_by_cat:
                 kalshi_by_cat[cat] = []
             kalshi_by_cat[cat].append(m)
-        
+
         # Log category breakdown
         logger.info("=== CATEGORY BREAKDOWN ===")
         for cat in set(list(poly_by_cat.keys()) + list(kalshi_by_cat.keys())):
             p_count = len(poly_by_cat.get(cat, []))
             k_count = len(kalshi_by_cat.get(cat, []))
             logger.info(f"  {cat}: Polymarket={p_count}, Kalshi={k_count}")
-        
+
         # Calculate total comparisons (only within categories)
         total_comparisons = sum(
             len(poly_by_cat.get(cat, [])) * len(kalshi_by_cat.get(cat, []))
             for cat in set(list(poly_by_cat.keys()) + list(kalshi_by_cat.keys()))
         )
-        
+
         logger.info(f"Total comparisons (category-based): {total_comparisons:,}")
-        logger.info(f"(vs {len(active_poly) * len(active_kalshi):,} if matching all-to-all)")
-        
+        logger.info(
+            f"(vs {len(active_poly) * len(active_kalshi):,} if matching all-to-all)"
+        )
+
         checked = 0
 
-        # Match within each category (skip 'other' - too noisy)
-        priority_categories = ['sports', 'politics', 'crypto', 'finance', 'entertainment', 'tech']
+        # Match within each category
+        priority_categories = [
+            "sports",
+            "politics",
+            "crypto",
+            "finance",
+            "entertainment",
+            "tech",
+            "other",
+        ]
 
         for category in priority_categories:
             poly_markets = poly_by_cat.get(category, [])
@@ -635,15 +892,19 @@ class MarketMatcher:
             if not poly_markets or not kalshi_markets_cat:
                 continue
 
-            logger.info(f"Matching {category}: {len(poly_markets)} x {len(kalshi_markets_cat)}")
+            logger.info(
+                f"Matching {category}: {len(poly_markets)} x {len(kalshi_markets_cat)}"
+            )
 
             # Pre-compute all expensive text operations once per market
             poly_data = [self._precompute_market_data(m.question) for m in poly_markets]
-            kalshi_data = [self._precompute_market_data(m.title) for m in kalshi_markets_cat]
+            kalshi_data = [
+                self._precompute_market_data(m.title) for m in kalshi_markets_cat
+            ]
 
             # Build team inverted index for sports to skip irrelevant pairs
             team_index: dict[str, list[int]] = {}
-            if category == 'sports':
+            if category == "sports":
                 for idx, kd in enumerate(kalshi_data):
                     for team in kd["teams"]:
                         team_index.setdefault(team, []).append(idx)
@@ -654,11 +915,15 @@ class MarketMatcher:
                 best_score = 0.0
 
                 # Sports: only compare against Kalshi markets sharing a team
-                if category == 'sports' and pd["teams"] and team_index:
+                if category == "sports" and pd["teams"] and team_index:
                     candidate_idxs: set[int] = set()
                     for team in pd["teams"]:
                         candidate_idxs.update(team_index.get(team, []))
-                    kalshi_candidates = candidate_idxs if candidate_idxs else range(len(kalshi_markets_cat))
+                    kalshi_candidates = (
+                        candidate_idxs
+                        if candidate_idxs
+                        else range(len(kalshi_markets_cat))
+                    )
                 else:
                     kalshi_candidates = range(len(kalshi_markets_cat))
 
@@ -678,10 +943,16 @@ class MarketMatcher:
                 # Yield to event loop periodically
                 if checked % 500 == 0:
                     await asyncio.sleep(0.01)
-                    pct = (checked / total_comparisons * 100) if total_comparisons > 0 else 0
+                    pct = (
+                        (checked / total_comparisons * 100)
+                        if total_comparisons > 0
+                        else 0
+                    )
 
                     if checked % 5000 == 0:
-                        logger.info(f"Progress: {checked:,}/{total_comparisons:,} ({pct:.1f}%) - {len(matches)} matches")
+                        logger.info(
+                            f"Progress: {checked:,}/{total_comparisons:,} ({pct:.1f}%) - {len(matches)} matches"
+                        )
 
                     if on_progress:
                         try:
@@ -711,10 +982,10 @@ class MarketMatcher:
                         f"MATCHED [{category}]: '{poly_market.question[:35]}...' <-> '{best_match.title[:35]}...' "
                         f"(score: {best_score:.2f})"
                     )
-        
+
         logger.info(f"=== MATCHING COMPLETE: {len(matches)} pairs found ===")
         return matches
-    
+
     def get_cached_pairs(self) -> list[MarketPair]:
         """Get all cached market pairs."""
         return list(self._matched_pairs.values())
@@ -723,11 +994,11 @@ class MarketMatcher:
 class CrossPlatformArbEngine:
     """
     Detects arbitrage opportunities between Polymarket and Kalshi.
-    
+
     Monitors matched market pairs and alerts when prices diverge enough
     to create profitable cross-platform arbitrage.
     """
-    
+
     def __init__(
         self,
         min_edge: float = 0.02,  # 2% minimum edge
@@ -737,7 +1008,7 @@ class CrossPlatformArbEngine:
     ):
         """
         Initialize cross-platform arb engine.
-        
+
         Args:
             min_edge: Minimum edge required (after fees) to signal
             polymarket_taker_fee: Polymarket taker fee rate
@@ -748,11 +1019,11 @@ class CrossPlatformArbEngine:
         self.polymarket_taker_fee = polymarket_taker_fee
         self.kalshi_taker_fee = kalshi_taker_fee
         self.gas_cost = gas_cost
-        
+
         self.matcher = MarketMatcher()
         self._opportunities: list[CrossPlatformOpportunity] = []
         self._opportunity_count = 0
-    
+
     def check_arbitrage(
         self,
         market_pair: MarketPair,
@@ -761,12 +1032,12 @@ class CrossPlatformArbEngine:
     ) -> Optional[CrossPlatformOpportunity]:
         """
         Check for arbitrage opportunity between a matched market pair.
-        
+
         Args:
             market_pair: The matched market pair
             polymarket_ob: Polymarket order book
             kalshi_ob: Kalshi order book (in unified format)
-            
+
         Returns:
             CrossPlatformOpportunity if found, None otherwise
         """
@@ -775,27 +1046,29 @@ class CrossPlatformArbEngine:
         poly_yes_bid = polymarket_ob.best_bid_yes
         poly_no_ask = polymarket_ob.best_ask_no
         poly_no_bid = polymarket_ob.best_bid_no
-        
+
         kalshi_yes_ask = kalshi_ob.best_ask_yes
         kalshi_yes_bid = kalshi_ob.best_bid_yes
         kalshi_no_ask = kalshi_ob.best_ask_no
         kalshi_no_bid = kalshi_ob.best_bid_no
-        
+
         # Check for valid prices
         if not all([poly_yes_ask, poly_yes_bid, kalshi_yes_ask, kalshi_yes_bid]):
             return None
-        
+
         best_opp = None
         best_net_edge = 0.0
-        
+
         # Check all possible arbitrage directions:
-        
+
         # 1. Buy YES on Polymarket, sell YES on Kalshi
         if poly_yes_ask and kalshi_yes_bid:
             gross = kalshi_yes_bid - poly_yes_ask
-            fees = (poly_yes_ask * self.polymarket_taker_fee + 
-                    kalshi_yes_bid * self.kalshi_taker_fee + 
-                    self.gas_cost * 2)
+            fees = (
+                poly_yes_ask * self.polymarket_taker_fee
+                + kalshi_yes_bid * self.kalshi_taker_fee
+                + self.gas_cost * 2
+            )
             net = gross - fees
             if net > best_net_edge and net >= self.min_edge:
                 best_net_edge = net
@@ -811,13 +1084,15 @@ class CrossPlatformArbEngine:
                     buy_liquidity=polymarket_ob.yes.asks.best_size or 0,
                     sell_liquidity=kalshi_ob.yes.bids.best_size or 0,
                 )
-        
+
         # 2. Buy YES on Kalshi, sell YES on Polymarket
         if kalshi_yes_ask and poly_yes_bid:
             gross = poly_yes_bid - kalshi_yes_ask
-            fees = (kalshi_yes_ask * self.kalshi_taker_fee + 
-                    poly_yes_bid * self.polymarket_taker_fee + 
-                    self.gas_cost * 2)
+            fees = (
+                kalshi_yes_ask * self.kalshi_taker_fee
+                + poly_yes_bid * self.polymarket_taker_fee
+                + self.gas_cost * 2
+            )
             net = gross - fees
             if net > best_net_edge and net >= self.min_edge:
                 best_net_edge = net
@@ -833,13 +1108,15 @@ class CrossPlatformArbEngine:
                     buy_liquidity=kalshi_ob.yes.asks.best_size or 0,
                     sell_liquidity=polymarket_ob.yes.bids.best_size or 0,
                 )
-        
+
         # 3. Buy NO on Polymarket, sell NO on Kalshi
         if poly_no_ask and kalshi_no_bid:
             gross = kalshi_no_bid - poly_no_ask
-            fees = (poly_no_ask * self.polymarket_taker_fee + 
-                    kalshi_no_bid * self.kalshi_taker_fee + 
-                    self.gas_cost * 2)
+            fees = (
+                poly_no_ask * self.polymarket_taker_fee
+                + kalshi_no_bid * self.kalshi_taker_fee
+                + self.gas_cost * 2
+            )
             net = gross - fees
             if net > best_net_edge and net >= self.min_edge:
                 best_net_edge = net
@@ -855,13 +1132,15 @@ class CrossPlatformArbEngine:
                     buy_liquidity=polymarket_ob.no.asks.best_size or 0,
                     sell_liquidity=kalshi_ob.no.bids.best_size or 0,
                 )
-        
+
         # 4. Buy NO on Kalshi, sell NO on Polymarket
         if kalshi_no_ask and poly_no_bid:
             gross = poly_no_bid - kalshi_no_ask
-            fees = (kalshi_no_ask * self.kalshi_taker_fee + 
-                    poly_no_bid * self.polymarket_taker_fee + 
-                    self.gas_cost * 2)
+            fees = (
+                kalshi_no_ask * self.kalshi_taker_fee
+                + poly_no_bid * self.polymarket_taker_fee
+                + self.gas_cost * 2
+            )
             net = gross - fees
             if net > best_net_edge and net >= self.min_edge:
                 best_net_edge = net
@@ -877,13 +1156,13 @@ class CrossPlatformArbEngine:
                     buy_liquidity=kalshi_ob.no.asks.best_size or 0,
                     sell_liquidity=polymarket_ob.no.bids.best_size or 0,
                 )
-        
+
         if best_opp:
             self._opportunities.append(best_opp)
             logger.info(f"🎯 CROSS-PLATFORM ARB: {best_opp}")
-        
+
         return best_opp
-    
+
     def _create_opportunity(
         self,
         market_pair: MarketPair,
@@ -899,13 +1178,13 @@ class CrossPlatformArbEngine:
     ) -> CrossPlatformOpportunity:
         """Create a cross-platform opportunity object."""
         self._opportunity_count += 1
-        
+
         # Calculate max size based on available liquidity
         max_size = min(buy_liquidity, sell_liquidity)
-        
+
         # Suggested size: smaller of max_size or $100 for safety
         suggested_size = min(max_size, 100.0)
-        
+
         return CrossPlatformOpportunity(
             opportunity_id=f"xplat_{self._opportunity_count}",
             market_pair=market_pair,
@@ -922,11 +1201,13 @@ class CrossPlatformArbEngine:
             buy_liquidity=buy_liquidity,
             sell_liquidity=sell_liquidity,
         )
-    
-    def get_recent_opportunities(self, limit: int = 50) -> list[CrossPlatformOpportunity]:
+
+    def get_recent_opportunities(
+        self, limit: int = 50
+    ) -> list[CrossPlatformOpportunity]:
         """Get most recent cross-platform opportunities."""
         return self._opportunities[-limit:]
-    
+
     def get_stats(self) -> dict:
         """Get cross-platform arbitrage statistics."""
         return {
@@ -934,7 +1215,7 @@ class CrossPlatformArbEngine:
             "matched_pairs": len(self.matcher.get_cached_pairs()),
             "avg_edge": (
                 sum(o.net_edge for o in self._opportunities) / len(self._opportunities)
-                if self._opportunities else 0
+                if self._opportunities
+                else 0
             ),
         }
-

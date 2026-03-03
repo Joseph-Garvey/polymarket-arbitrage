@@ -200,6 +200,7 @@ class Market:
     category: str = ""
     tags: list[str] = field(default_factory=list)
     group_id: str = ""  # For multi-leg grouping (e.g., neg_risk_market_id)
+    group_size: int = 0  # Total number of markets in this group
 
 
 @dataclass

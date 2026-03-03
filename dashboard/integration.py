@@ -18,10 +18,10 @@ logger = logging.getLogger(__name__)
 class DashboardIntegration:
     """
     Integrates the trading bot with the dashboard.
-    
+
     Updates the dashboard state with live data from the bot.
     """
-    
+
     def __init__(
         self,
         data_feed=None,
@@ -36,38 +36,36 @@ class DashboardIntegration:
         self.execution_engine = execution_engine
         self.risk_manager = risk_manager
         self.portfolio = portfolio
-        
+
         dashboard_state.mode = mode
         dashboard_state.is_running = False
-        
+
         self._update_task: Optional[asyncio.Task] = None
         self._running = False
-    
+
     async def start(self, update_interval: float = 1.0) -> None:
         """Start the dashboard integration."""
         self._running = True
         dashboard_state.is_running = True
-        
-        self._update_task = asyncio.create_task(
-            self._update_loop(update_interval)
-        )
-        
+
+        self._update_task = asyncio.create_task(self._update_loop(update_interval))
+
         logger.info("Dashboard integration started")
-    
+
     async def stop(self) -> None:
         """Stop the dashboard integration."""
         self._running = False
         dashboard_state.is_running = False
-        
+
         if self._update_task:
             self._update_task.cancel()
             try:
                 await self._update_task
             except asyncio.CancelledError:
                 pass
-        
+
         logger.info("Dashboard integration stopped")
-    
+
     async def _update_loop(self, interval: float) -> None:
         """Periodically update the dashboard state."""
         while self._running:
@@ -78,9 +76,9 @@ class DashboardIntegration:
             except asyncio.CancelledError:
                 break
             except Exception as e:
-                logger.error(f"Dashboard update error: {e}")
+                logger.exception(f"Dashboard update error: {e}")
                 await asyncio.sleep(interval)
-    
+
     async def _update_state(self) -> None:
         """Update the dashboard state from bot components."""
         # Update markets
@@ -90,7 +88,9 @@ class DashboardIntegration:
                 ob = state.order_book
                 markets[market_id] = {
                     "market_id": market_id,
-                    "question": state.market.question[:80] if state.market.question else market_id,
+                    "question": state.market.question[:80]
+                    if state.market.question
+                    else market_id,
                     "best_bid_yes": ob.best_bid_yes,
                     "best_ask_yes": ob.best_ask_yes,
                     "best_bid_no": ob.best_bid_no,
@@ -101,16 +101,16 @@ class DashboardIntegration:
                     "spread_no": ob.no.spread if ob.no else None,
                 }
             dashboard_state.markets = markets
-        
+
         # Update portfolio
         if self.portfolio:
             summary = self.portfolio.get_summary()
             dashboard_state.portfolio = summary
-        
+
         # Update risk
         if self.risk_manager:
             dashboard_state.risk = self.risk_manager.get_summary()
-        
+
         # Update orders
         if self.execution_engine:
             orders = self.execution_engine.get_open_orders()
@@ -127,7 +127,7 @@ class DashboardIntegration:
                 }
                 for o in orders
             ]
-            
+
             # Update stats
             stats = self.execution_engine.get_stats()
             dashboard_state.stats = {
@@ -136,23 +136,30 @@ class DashboardIntegration:
                 "orders_cancelled": stats.orders_cancelled,
                 "signals_processed": stats.signals_processed,
             }
-        
+
         # Update arb stats and timing
         if self.arb_engine:
             arb_stats = self.arb_engine.get_stats()
-            dashboard_state.stats.update({
-                "bundle_opportunities": arb_stats.bundle_opportunities_detected,
-                "mm_opportunities": arb_stats.mm_opportunities_detected,
-                "signals_generated": arb_stats.signals_generated,
-            })
-            
+            dashboard_state.stats.update(
+                {
+                    "bundle_opportunities": arb_stats.bundle_opportunities_detected,
+                    "mm_opportunities": arb_stats.mm_opportunities_detected,
+                    "signals_generated": arb_stats.signals_generated,
+                }
+            )
+
             # Update opportunity timing stats
             dashboard_state.timing = self.arb_engine.get_timing_stats()
-        
+
         # Update operational stats
         if self.data_feed:
-            markets_with_data = len([m for m in dashboard_state.markets.values() 
-                                     if m.get("best_bid_yes") or m.get("best_ask_yes")])
+            markets_with_data = len(
+                [
+                    m
+                    for m in dashboard_state.markets.values()
+                    if m.get("best_bid_yes") or m.get("best_ask_yes")
+                ]
+            )
             dashboard_state.operational = {
                 "total_markets": len(self.data_feed.market_ids),
                 "markets_with_orderbooks": len(dashboard_state.markets),
@@ -160,75 +167,41 @@ class DashboardIntegration:
                 "orderbook_updates": self.data_feed.update_count,
                 "is_streaming": self.data_feed.is_running,
             }
-        
+
         dashboard_state.last_update = datetime.utcnow()
-    
+
     async def _broadcast_update(self) -> None:
         """Broadcast update to connected clients."""
-        await dashboard_state.broadcast({
-            "type": "update",
-            "data": dashboard_state.to_dict()
-        })
-    
+        await dashboard_state.broadcast(
+            {"type": "update", "data": dashboard_state.to_dict()}
+        )
+
     def add_opportunity(
-        self,
-        opportunity_type: str,
-        market_id: str,
-        edge: float,
-        **kwargs
+        self, opportunity_type: str, market_id: str, edge: float, **kwargs
     ) -> None:
         """Add an opportunity to the dashboard."""
-        opp = {
-            "type": opportunity_type,
-            "market_id": market_id,
-            "edge": edge,
-            **kwargs
-        }
+        opp = {"type": opportunity_type, "market_id": market_id, "edge": edge, **kwargs}
         dashboard_state.add_opportunity(opp)
-        
-        # Broadcast immediately
-        asyncio.create_task(dashboard_state.broadcast({
-            "type": "opportunity",
-            "data": opp
-        }))
-    
-    def add_signal(
-        self,
-        action: str,
-        market_id: str,
-        **kwargs
-    ) -> None:
-        """Add a signal to the dashboard."""
-        signal = {
-            "action": action,
-            "market_id": market_id,
-            **kwargs
-        }
-        dashboard_state.add_signal(signal)
-        
-        asyncio.create_task(dashboard_state.broadcast({
-            "type": "activity",
-            "data": signal
-        }))
-    
-    def add_trade(
-        self,
-        side: str,
-        price: float,
-        size: float,
-        **kwargs
-    ) -> None:
-        """Add a trade to the dashboard."""
-        trade = {
-            "side": side,
-            "price": price,
-            "size": size,
-            **kwargs
-        }
-        dashboard_state.add_trade(trade)
-        
-        asyncio.create_task(dashboard_state.broadcast({
-            "type": "activity",
-            "data": trade
-        }))
 
+        # Broadcast immediately
+        asyncio.create_task(
+            dashboard_state.broadcast({"type": "opportunity", "data": opp})
+        )
+
+    def add_signal(self, action: str, market_id: str, **kwargs) -> None:
+        """Add a signal to the dashboard."""
+        signal = {"action": action, "market_id": market_id, **kwargs}
+        dashboard_state.add_signal(signal)
+
+        asyncio.create_task(
+            dashboard_state.broadcast({"type": "activity", "data": signal})
+        )
+
+    def add_trade(self, side: str, price: float, size: float, **kwargs) -> None:
+        """Add a trade to the dashboard."""
+        trade = {"side": side, "price": price, "size": size, **kwargs}
+        dashboard_state.add_trade(trade)
+
+        asyncio.create_task(
+            dashboard_state.broadcast({"type": "activity", "data": trade})
+        )

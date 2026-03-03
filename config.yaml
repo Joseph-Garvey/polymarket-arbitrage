@@ -69,6 +69,10 @@ risk:
   whitelist: []                  # If non-empty, only trade these markets
   blacklist: []                  # Never trade these markets
   
+  # Category filters
+  allowed_categories: []         # If non-empty, only trade markets in these categories
+  excluded_categories: []        # Never trade markets in these categories
+  
   # Kill switch
   kill_switch_enabled: true
   auto_unwind_on_breach: false

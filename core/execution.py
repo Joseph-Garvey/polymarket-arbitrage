@@ -156,7 +156,7 @@ class ExecutionEngine:
             except asyncio.CancelledError:
                 raise
             except Exception as e:
-                logger.error(f"Signal processing error: {e}")
+                logger.exception(f"Signal processing error: {e}")
 
     async def _execute_signal(self, signal: Signal) -> None:
         """Execute a single trading signal."""
@@ -230,7 +230,7 @@ class ExecutionEngine:
             return order
 
         except Exception as e:
-            logger.error(f"Failed to place order: {e}")
+            logger.exception(f"Failed to place order: {e}")
             self.stats.orders_rejected += 1
             return None
 
@@ -351,7 +351,7 @@ class ExecutionEngine:
             try:
                 await self.cancel_order(order_id)
             except Exception as e:
-                logger.error(f"Failed to cancel order {order_id}: {e}")
+                logger.exception(f"Failed to cancel order {order_id}: {e}")
 
     def _check_slippage(self, opportunity, order_spec: dict) -> bool:
         """
@@ -484,7 +484,7 @@ class ExecutionEngine:
             logger.info(f"Order cancelled: {order_id}")
             return True
         except Exception as e:
-            logger.error(f"Failed to cancel order {order_id}: {e}")
+            logger.exception(f"Failed to cancel order {order_id}: {e}")
             return False
 
     async def cancel_all_orders(self, market_id: Optional[str] = None) -> int:
@@ -535,7 +535,7 @@ class ExecutionEngine:
             except asyncio.CancelledError:
                 raise
             except Exception as e:
-                logger.error(f"Order timeout monitor error: {e}")
+                logger.exception(f"Order timeout monitor error: {e}")
 
     def handle_fill(self, trade: Trade) -> None:
         """Handle a trade fill notification."""

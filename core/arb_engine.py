@@ -170,11 +170,17 @@ class ArbEngine:
 
             # Check for multi-leg arbitrage if this market belongs to a group
             if group_id and len(self._group_states[group_id]) > 1:
-                multileg_signal = self._check_multileg_arbitrage(
-                    group_id, self._group_states[group_id], bankroll
-                )
-                if multileg_signal:
-                    signals.append(multileg_signal)
+                # Ensure we have all legs of the group before analyzing!
+                expected_legs = market_state.market.group_size
+                if (
+                    expected_legs > 1
+                    and len(self._group_states[group_id]) >= expected_legs
+                ):
+                    multileg_signal = self._check_multileg_arbitrage(
+                        group_id, self._group_states[group_id], bankroll
+                    )
+                    if multileg_signal:
+                        signals.append(multileg_signal)
 
         # Check for market-making opportunities
         if self.config.mm_enabled:

@@ -21,7 +21,7 @@ logger = logging.getLogger(__name__)
 
 class DashboardState:
     """Holds the current state for the dashboard."""
-    
+
     def __init__(self):
         self.markets: dict = {}
         self.opportunities: list = []
@@ -37,7 +37,7 @@ class DashboardState:
         self.mode: str = "dry_run"
         self.last_update: datetime = datetime.utcnow()
         self.started_at: datetime = datetime.utcnow()
-        
+
         # Cross-platform (Polymarket + Kalshi)
         self.cross_platform: dict = {
             "enabled": False,
@@ -52,10 +52,10 @@ class DashboardState:
             "matching_total": 0,  # Total comparisons to do
             "matching_status": "idle",  # idle, matching, complete
         }
-        
+
         # WebSocket connections
         self._connections: list[WebSocket] = []
-    
+
     def to_dict(self) -> dict:
         """Convert state to dictionary for JSON serialization."""
         uptime = (datetime.utcnow() - self.started_at).total_seconds()
@@ -77,59 +77,61 @@ class DashboardState:
             "started_at": self.started_at.isoformat(),
             "uptime_seconds": uptime,
         }
-    
+
     async def broadcast(self, data: dict) -> None:
         """Broadcast update to all connected WebSocket clients."""
         if not self._connections:
             return
-        
+
         message = json.dumps(data)
         disconnected = []
-        
+
         for ws in self._connections:
             try:
                 await ws.send_text(message)
             except Exception:
                 disconnected.append(ws)
-        
+
         for ws in disconnected:
             self._connections.remove(ws)
-    
+
     def add_opportunity(self, opportunity: dict) -> None:
         """Add a new opportunity."""
         opportunity["timestamp"] = datetime.utcnow().isoformat()
         self.opportunities.append(opportunity)
         if len(self.opportunities) > 200:
             self.opportunities = self.opportunities[-100:]
-    
+
     def add_signal(self, signal: dict) -> None:
         """Add a new signal."""
         signal["timestamp"] = datetime.utcnow().isoformat()
         self.signals.append(signal)
         if len(self.signals) > 200:
             self.signals = self.signals[-100:]
-    
+
     def add_trade(self, trade: dict) -> None:
         """Add a new trade."""
         trade["timestamp"] = datetime.utcnow().isoformat()
         self.trades.append(trade)
         if len(self.trades) > 500:
             self.trades = self.trades[-250:]
-    
+
     def add_cross_platform_opportunity(self, opportunity: dict) -> None:
         """Add a cross-platform arbitrage opportunity."""
         opportunity["timestamp"] = datetime.utcnow().isoformat()
         self.cross_platform["cross_opportunities"].append(opportunity)
         if len(self.cross_platform["cross_opportunities"]) > 100:
-            self.cross_platform["cross_opportunities"] = self.cross_platform["cross_opportunities"][-50:]
-    
+            self.cross_platform["cross_opportunities"] = self.cross_platform[
+                "cross_opportunities"
+            ][-50:]
+
     def update_cross_platform_stats(
         self,
         kalshi_markets: int,
         polymarket_markets: int,
         matched_pairs: int,
         enabled: bool = True,
-        matched_pairs_data: list = None,
+        matched_pairs_data: "list | None" = None,
     ) -> None:
         """Update cross-platform statistics."""
         self.cross_platform["enabled"] = enabled
@@ -151,12 +153,12 @@ def create_app() -> FastAPI:
         description="Live monitoring dashboard for the trading bot",
         version="1.0.0",
     )
-    
+
     # Serve static files
     static_dir = Path(__file__).parent / "static"
     if static_dir.exists():
         app.mount("/static", StaticFiles(directory=str(static_dir)), name="static")
-    
+
     @app.get("/", response_class=HTMLResponse)
     async def index():
         """Serve the main dashboard page."""
@@ -164,56 +166,54 @@ def create_app() -> FastAPI:
         if html_path.exists():
             return html_path.read_text()
         return get_embedded_html()
-    
+
     @app.get("/api/state")
     async def get_state():
         """Get current dashboard state."""
         return dashboard_state.to_dict()
-    
+
     @app.get("/api/markets")
     async def get_markets():
         """Get current market data."""
         return {"markets": dashboard_state.markets}
-    
+
     @app.get("/api/opportunities")
     async def get_opportunities():
         """Get recent opportunities."""
         return {"opportunities": dashboard_state.opportunities[-50:]}
-    
+
     @app.get("/api/portfolio")
     async def get_portfolio():
         """Get portfolio state."""
         return dashboard_state.portfolio
-    
+
     @app.get("/api/risk")
     async def get_risk():
         """Get risk metrics."""
         return dashboard_state.risk
-    
+
     @app.get("/api/timing")
     async def get_timing():
         """Get opportunity timing statistics."""
         return dashboard_state.timing
-    
+
     @app.websocket("/ws")
     async def websocket_endpoint(websocket: WebSocket):
         """WebSocket endpoint for real-time updates."""
         await websocket.accept()
         dashboard_state._connections.append(websocket)
-        
+
         try:
             # Send initial state
-            await websocket.send_text(json.dumps({
-                "type": "initial",
-                "data": dashboard_state.to_dict()
-            }))
-            
+            await websocket.send_text(
+                json.dumps({"type": "initial", "data": dashboard_state.to_dict()})
+            )
+
             # Keep connection alive and receive any commands
             while True:
                 try:
                     data = await asyncio.wait_for(
-                        websocket.receive_text(),
-                        timeout=30.0
+                        websocket.receive_text(), timeout=30.0
                     )
                     # Handle any commands from client
                     msg = json.loads(data)
@@ -222,7 +222,7 @@ def create_app() -> FastAPI:
                 except asyncio.TimeoutError:
                     # Send heartbeat
                     await websocket.send_text(json.dumps({"type": "heartbeat"}))
-                    
+
         except WebSocketDisconnect:
             pass
         except Exception as e:
@@ -230,13 +230,13 @@ def create_app() -> FastAPI:
         finally:
             if websocket in dashboard_state._connections:
                 dashboard_state._connections.remove(websocket)
-    
+
     return app
 
 
 def get_embedded_html() -> str:
     """Return embedded HTML for the dashboard."""
-    return '''<!DOCTYPE html>
+    return """<!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
@@ -2166,14 +2166,42 @@ def get_embedded_html() -> str:
             // 1. Add Polymarket bundle arbitrage opportunities
             const bundleOpps = state.opportunities || [];
             bundleOpps.forEach(opp => {
+                const oppType = opp.type || opp.opportunity_type || 'bundle_long';
+                
+                let title = opp.market_question || opp.market_id || 'Arbitrage Opportunity';
+                if (oppType.includes('multileg')) {
+                    title = 'Multi-Leg: ' + title;
+                }
+                
+                let action1 = 'BUY YES';
+                let action2 = 'BUY NO';
+                let price1 = opp.yes_price || opp.best_ask_yes || 0;
+                let price2 = opp.no_price || opp.best_ask_no || 0;
+                let infoText = 'Bundle: YES + NO < 100%';
+                
+                if (oppType.includes('short')) {
+                    action1 = 'SELL YES';
+                    action2 = 'SELL NO';
+                    price1 = opp.best_bid_yes || 0;
+                    price2 = opp.best_bid_no || 0;
+                    infoText = 'Bundle: YES + NO > 100%';
+                } else if (oppType.includes('multileg')) {
+                    action1 = 'BUY YES (All Legs)';
+                    action2 = '---';
+                    price1 = opp.best_ask_yes || null; // Might be null
+                    price2 = null;
+                    infoText = 'Multi-Leg Arb';
+                }
+
                 allOpportunities.push({
                     type: 'polymarket',
-                    title: opp.market_question || 'Bundle Arbitrage',
-                    category: detectCategory(opp.market_question || ''),
-                    edge: opp.net_edge_pct || opp.edge_pct || 0,
-                    platform1: { name: 'Polymarket', price: opp.yes_price || 0.5, action: 'BUY YES' },
-                    platform2: { name: 'Polymarket', price: opp.no_price || 0.5, action: 'BUY NO' },
-                    marketInfo: 'Bundle: YES + NO < 100%'
+                    title: title,
+                    category: detectCategory(title),
+                    edge: opp.net_edge_pct || opp.edge_pct || opp.edge || 0,
+                    platform1: { name: 'Polymarket', price: price1, action: action1 },
+                    platform2: { name: 'Polymarket', price: price2, action: action2 },
+                    marketInfo: infoText,
+                    oppType: oppType
                 });
             });
             
@@ -2233,12 +2261,15 @@ def get_embedded_html() -> str:
                                   opp.type === 'polymarket' ? 'polymarket' : 'kalshi';
                 const badgeClass = getBadgeClass(opp.category);
                 
+                const isMultileg = opp.oppType && opp.oppType.includes('multileg');
+                
                 return `
                     <div class="opp-card ${cardClass}">
                         <div class="opp-header">
                             <div class="opp-category">
                                 <span class="opp-badge ${badgeClass}">${opp.category}</span>
                                 ${opp.type === 'cross-platform' ? '<span class="opp-badge cross">CROSS</span>' : ''}
+                                ${isMultileg ? '<span class="opp-badge" style="background: #1e3a5f; color: #60a5fa;">MULTI</span>' : ''}
                             </div>
                             ${hasArb ? 
                                 `<div class="opp-edge">+${edgePct}%</div>` : 
@@ -2256,21 +2287,23 @@ def get_embedded_html() -> str:
                                     <span class="opp-platform-icon ${opp.platform1.name.toLowerCase().includes('poly') ? 'poly' : 'kalshi'}">
                                         ${opp.platform1.name.charAt(0)}
                                     </span>
-                                    ${opp.platform1.name}
+                                    ${opp.type === 'polymarket' ? opp.platform1.action : opp.platform1.name}
                                     ${hasArb ? '<span style="margin-left: auto; font-size: 0.65rem; color: var(--accent-green);">↗</span>' : ''}
                                 </div>
                                 <div class="opp-platform-price ${hasArb ? 'buy' : ''}">${formatPct(opp.platform1.price)}</div>
                             </div>
+                            ${!isMultileg ? `
                             <div class="opp-platform-row">
                                 <div class="opp-platform-name">
                                     <span class="opp-platform-icon ${opp.platform2.name.toLowerCase().includes('kalshi') ? 'kalshi' : 'poly'}">
                                         ${opp.platform2.name.charAt(0)}
                                     </span>
-                                    ${opp.platform2.name}
+                                    ${opp.type === 'polymarket' ? opp.platform2.action : opp.platform2.name}
                                     ${hasArb ? '<span style="margin-left: auto; font-size: 0.65rem; color: #ef4444;">↘</span>' : ''}
                                 </div>
                                 <div class="opp-platform-price ${hasArb ? 'sell' : ''}">${formatPct(opp.platform2.price)}</div>
                             </div>
+                            ` : ''}
                         </div>
                     </div>
                 `;
@@ -2427,9 +2460,8 @@ def get_embedded_html() -> str:
         setInterval(fetchState, 5000);
     </script>
 </body>
-</html>'''
+</html>"""
 
 
 # Create the app
 app = create_app()
-
