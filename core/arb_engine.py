@@ -157,6 +157,14 @@ class ArbEngine:
                 self._group_states[group_id] = {}
             self._group_states[group_id][market_id] = market_state
 
+            # Evict resolved/closed markets from group tracking to prevent memory leak
+            if market_state.market.resolved or market_state.market.closed:
+                self._group_states.pop(group_id, None)
+            # Cap total group count at 500 (insertion-ordered: first key is oldest)
+            elif len(self._group_states) >= 500:
+                oldest_key = next(iter(self._group_states))
+                del self._group_states[oldest_key]
+
         # Check if previously tracked opportunities have expired
         self._check_expired_opportunities(market_id, order_book)
 
@@ -168,19 +176,26 @@ class ArbEngine:
             if bundle_signal:
                 signals.append(bundle_signal)
 
-            # Check for multi-leg arbitrage if this market belongs to a group
-            if group_id and len(self._group_states[group_id]) > 1:
-                # Ensure we have all legs of the group before analyzing!
+            # Check for multi-leg arbitrage if this market belongs to a group.
+            # Skip if bundle_signal already fired — a 2-market NegRisk group would
+            # otherwise emit both BUNDLE_LONG and MULTILEG_LONG for the same legs.
+            # Skip if we are already tracking an active multileg opportunity — without
+            # this guard every WebSocket tick fires _check_multileg_arbitrage().
+            # Skip if group_size is set and we haven't seen all expected legs yet —
+            # a partial group view cannot confirm the arb is risk-free.
+            if group_id and group_id in self._group_states and len(self._group_states[group_id]) > 1 and bundle_signal is None:
+                group_states_now = self._group_states[group_id]
                 expected_legs = market_state.market.group_size
-                if (
-                    expected_legs > 1
-                    and len(self._group_states[group_id]) >= expected_legs
-                ):
-                    multileg_signal = self._check_multileg_arbitrage(
-                        group_id, self._group_states[group_id], bankroll
-                    )
-                    if multileg_signal:
-                        signals.append(multileg_signal)
+                if expected_legs > 0 and len(group_states_now) < expected_legs:
+                    pass  # Partial group — wait until all legs are observed
+                else:
+                    multileg_key = f"{group_id}_multileg_long"
+                    if multileg_key not in self._active_opportunities:
+                        multileg_signal = self._check_multileg_arbitrage(
+                            group_id, group_states_now, bankroll
+                        )
+                        if multileg_signal:
+                            signals.append(multileg_signal)
 
         # Check for market-making opportunities
         if self.config.mm_enabled:
@@ -196,8 +211,21 @@ class ArbEngine:
         now = datetime.utcnow()
         expired_keys = []
 
+        # Determine which group_ids this market_id belongs to, so multileg
+        # opportunities whose timing.market_id is the group_id are also evaluated.
+        groups_for_market: set[str] = {
+            gid
+            for gid, members in self._group_states.items()
+            if market_id in members
+        }
+
         for key, timing in self._active_opportunities.items():
-            if timing.market_id != market_id:
+            is_multileg = "multileg_long" in timing.opportunity_type
+            # Bundle entries: only check when the triggering market matches.
+            # Multileg entries: check when any member market of that group fires.
+            if not is_multileg and timing.market_id != market_id:
+                continue
+            if is_multileg and timing.market_id not in groups_for_market:
                 continue
 
             # Check if opportunity still exists
@@ -207,9 +235,7 @@ class ArbEngine:
                 # Check if total ask is still < 1 - min_edge
                 if order_book.best_ask_yes and order_book.best_ask_no:
                     total_ask = order_book.best_ask_yes + order_book.best_ask_no
-                    if (
-                        1.0 - total_ask >= self.config.min_edge * 0.5
-                    ):  # Use lower threshold
+                    if 1.0 - total_ask >= self.config.min_edge * 0.5:
                         still_valid = True
 
             elif "bundle_short" in timing.opportunity_type:
@@ -217,6 +243,22 @@ class ArbEngine:
                 if order_book.best_bid_yes and order_book.best_bid_no:
                     total_bid = order_book.best_bid_yes + order_book.best_bid_no
                     if total_bid - 1.0 >= self.config.min_edge * 0.5:
+                        still_valid = True
+
+            elif is_multileg:
+                # timing.market_id IS the group_id for multileg entries.
+                # Opportunity is still live if sum of YES asks across all legs < 1.
+                group_id_ml = timing.market_id
+                if group_id_ml in self._group_states:
+                    total_yes_ask = 0.0
+                    all_valid = True
+                    for state in self._group_states[group_id_ml].values():
+                        ask_yes = state.order_book.best_ask_yes
+                        if ask_yes is None:
+                            all_valid = False
+                            break
+                        total_yes_ask += ask_yes
+                    if all_valid and 1.0 - total_yes_ask >= self.config.min_edge * 0.5:
                         still_valid = True
 
             # Also expire if too old (10 seconds max)
