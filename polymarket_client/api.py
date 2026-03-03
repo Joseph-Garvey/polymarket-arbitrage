@@ -999,6 +999,7 @@ class PolymarketClient(BasePolymarketClient):
             price=order.price,
             size=fill_size,
             fee=fee,  # Realistic 1.5% fee
+            strategy_tag=order.strategy_tag,
         )
         
         # Update order

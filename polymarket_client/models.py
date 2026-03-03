@@ -287,6 +287,7 @@ class Trade:
     price: float
     size: float
     fee: float = 0.0
+    strategy_tag: str = ""  # e.g., "bundle_arb", "multileg_arb"
     timestamp: datetime = field(default_factory=datetime.utcnow)
 
     @property

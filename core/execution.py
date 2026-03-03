@@ -577,11 +577,9 @@ class ExecutionEngine:
 
         # If both legs of a bundle arb BUY are now filled, record the locked profit.
         # This enables correct PnL and prevents the kill switch from false-firing.
-        if (
-            getattr(trade, "strategy_tag", "") == "bundle_arb"
-            and trade.side == OrderSide.BUY
-        ):
-            self._maybe_open_arb_pair(trade.market_id)
+        # Also handle multileg_arb fills to register the re-entry guard.
+        if trade.strategy_tag in ("bundle_arb", "multileg_arb") and trade.side == OrderSide.BUY:
+            self._maybe_open_arb_pair(trade.market_id, trade.strategy_tag)
 
         # Update risk manager
         self.risk_manager.update_from_fill(trade)
@@ -591,21 +589,41 @@ class ExecutionEngine:
             f"{trade.side.value} {trade.size:.2f} {trade.token_type.value} @ {trade.price:.4f}"
         )
 
-    def _maybe_open_arb_pair(self, market_id: str) -> None:
-        """Open an arb pair on the portfolio once both YES and NO legs are filled."""
+    def _maybe_open_arb_pair(self, market_id: str, strategy_tag: str = "bundle_arb") -> None:
+        """Open an arb pair on the portfolio once the relevant legs are filled.
+
+        For bundle_arb: requires both YES and NO positions to exist before opening
+        the pair (YES + NO sum < 1 guarantees locked profit).
+
+        For multileg_arb: each market holds only a YES position (one leg of a
+        multi-market bet). The re-entry guard uses _open_arb_pairs membership, so
+        we add the market_id as soon as the YES position exists. We use 0.0 for
+        the no_entry price because there is no NO leg in a multileg trade.
+        """
         if market_id in self.portfolio._open_arb_pairs:
-            return  # Already tracking this pair
+            return  # Already tracking this market
 
         yes_pos = self.portfolio.get_position(market_id, TokenType.YES)
-        no_pos = self.portfolio.get_position(market_id, TokenType.NO)
 
-        if yes_pos and no_pos and yes_pos.size > 0 and no_pos.size > 0:
-            self.portfolio.open_arb_pair(
-                market_id=market_id,
-                yes_entry=yes_pos.avg_entry_price,
-                no_entry=no_pos.avg_entry_price,
-                size=min(yes_pos.size, no_pos.size),
-            )
+        if strategy_tag == "multileg_arb":
+            # Multileg: only a YES position per market; register as soon as it exists
+            if yes_pos and yes_pos.size > 0:
+                self.portfolio.open_arb_pair(
+                    market_id=market_id,
+                    yes_entry=yes_pos.avg_entry_price,
+                    no_entry=0.0,
+                    size=yes_pos.size,
+                )
+        else:
+            # bundle_arb: require both YES and NO legs before opening pair
+            no_pos = self.portfolio.get_position(market_id, TokenType.NO)
+            if yes_pos and no_pos and yes_pos.size > 0 and no_pos.size > 0:
+                self.portfolio.open_arb_pair(
+                    market_id=market_id,
+                    yes_entry=yes_pos.avg_entry_price,
+                    no_entry=no_pos.avg_entry_price,
+                    size=min(yes_pos.size, no_pos.size),
+                )
 
     def get_open_orders(self, market_id: Optional[str] = None) -> list[Order]:
         """Get all open orders, optionally filtered by market."""
