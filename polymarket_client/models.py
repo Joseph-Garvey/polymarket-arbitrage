@@ -42,8 +42,7 @@ class OpportunityType(Enum):
 
     BUNDLE_LONG = "bundle_long"  # Buy YES + NO when sum < 1
     BUNDLE_SHORT = "bundle_short"  # Sell YES + NO when sum > 1
-    MULTILEG_LONG = "multileg_long"  # Buy YES on N options
-    MULTILEG_SHORT = "multileg_short"  # Buy NO on N options
+    MULTILEG_LONG = "multileg_long"  # Buy YES on N mutually exclusive options
     MM_BID = "mm_bid"  # Market-making bid placement
     MM_ASK = "mm_ask"  # Market-making ask placement
 
@@ -334,10 +333,7 @@ class Opportunity:
 
     @property
     def is_multileg_arb(self) -> bool:
-        return self.opportunity_type in (
-            OpportunityType.MULTILEG_LONG,
-            OpportunityType.MULTILEG_SHORT,
-        )
+        return self.opportunity_type == OpportunityType.MULTILEG_LONG
 
     @property
     def is_market_making(self) -> bool:

@@ -245,7 +245,7 @@ class ExecutionEngine:
                     return
             proposed = Order(
                 order_id="temp",
-                market_id=signal.market_id,
+                market_id=order_spec.get("market_id", signal.market_id),
                 token_type=order_spec["token_type"],
                 side=order_spec["side"],
                 price=order_spec["price"],

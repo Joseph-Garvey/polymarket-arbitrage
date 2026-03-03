@@ -157,6 +157,15 @@ class ArbEngine:
                 self._group_states[group_id] = {}
             self._group_states[group_id][market_id] = market_state
 
+            # Evict resolved/closed markets from group tracking to prevent memory leak
+            if market_state.market.resolved or market_state.market.closed:
+                self._group_states.pop(group_id, None)
+            # Cap total group count at 500: evict the oldest entry (dicts are
+            # insertion-ordered in Python 3.7+, so the first key is oldest)
+            elif len(self._group_states) > 500:
+                oldest_key = next(iter(self._group_states))
+                del self._group_states[oldest_key]
+
         # Check if previously tracked opportunities have expired
         self._check_expired_opportunities(market_id, order_book)
 
@@ -653,9 +662,9 @@ class ArbEngine:
         net_edge = gross_edge - fee_cost - gas_cost
 
         if net_edge >= self.config.min_edge:
-            # Check liquidity gate
-            min_executable = self.config.min_order_size * num_legs
-            if max_possible_size < min_executable:
+            # Check liquidity gate: max_possible_size is the per-leg minimum depth,
+            # and min_order_size is also per-leg, so the comparison is direct.
+            if max_possible_size < self.config.min_order_size:
                 logger.debug(
                     f"Skipping group {group_id} multileg long: insufficient liquidity "
                     f"(max size: {max_possible_size:.2f})"
@@ -706,7 +715,7 @@ class ArbEngine:
                     {
                         "market_id": leg[
                             "market_id"
-                        ],  # Add market_id override since signal market_id is group_id
+                        ],  # Per-leg market_id — signal.market_id is the aggregate group_id
                         "token_type": TokenType.YES,
                         "side": OrderSide.BUY,
                         "price": leg["ask_yes"],
