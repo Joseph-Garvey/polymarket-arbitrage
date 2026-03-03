@@ -342,3 +342,116 @@ class TestCheckMultilegArbitrage:
             engine._check_multileg_arbitrage(group_id, states, bankroll=1000.0)
         )
         assert signal2 is None
+
+
+# ---------------------------------------------------------------------------
+# Bug fix regression tests
+# ---------------------------------------------------------------------------
+
+
+class TestGroupStatesCapEviction:
+    """
+    Regression: _group_states cap evicted active groups on every update when
+    len >= 500, not just on new insertions.
+    """
+
+    def _make_active_state(self, market_id: str, group_id: str) -> MarketState:
+        ob = _create_order_book_ml(
+            market_id,
+            yes_bid=0.37, yes_ask=0.40, no_bid=0.58, no_ask=0.62, size=200.0,
+        )
+        return MarketState(
+            market=Market(
+                market_id=market_id, condition_id=market_id, question="Test",
+                active=True, volume_24h=50000.0, group_id=group_id,
+            ),
+            order_book=ob,
+        )
+
+    def test_updating_existing_group_does_not_evict_when_at_cap(self, arb_config: ArbConfig):
+        """Updating a market in an existing group must not evict any group when len >= 500."""
+        engine = ArbEngine(arb_config)
+
+        # Seed exactly 500 groups directly (avoids running full analyze() 500 times)
+        seed_state = self._make_active_state("seed_market", "seed_group_0")
+        for i in range(500):
+            gid = f"seed_group_{i}"
+            mid = f"seed_market_{i}"
+            engine._group_states[gid] = {mid: seed_state}
+
+        assert len(engine._group_states) == 500
+        oldest_group = next(iter(engine._group_states))  # "seed_group_0"
+
+        # Analyze a market that belongs to an ALREADY-TRACKED group — no eviction should happen
+        state = self._make_active_state("seed_market_0", "seed_group_0")
+        engine.analyze(state, bankroll=1000.0)
+
+        assert len(engine._group_states) == 500, (
+            "Updating an existing group must not evict any group (dict size changed)"
+        )
+        assert oldest_group in engine._group_states, (
+            f"'{oldest_group}' was wrongly evicted when updating an existing group"
+        )
+
+    def test_new_group_evicts_oldest_when_at_cap(self, arb_config: ArbConfig):
+        """Adding a brand-new (501st) group should evict the oldest, keeping the cap."""
+        engine = ArbEngine(arb_config)
+
+        seed_state = self._make_active_state("seed_market", "seed_group_0")
+        for i in range(500):
+            gid = f"seed_group_{i}"
+            mid = f"seed_market_{i}"
+            engine._group_states[gid] = {mid: seed_state}
+
+        oldest_group = next(iter(engine._group_states))  # "seed_group_0"
+
+        # Analyze a BRAND NEW group — should evict oldest, new one takes its place
+        new_state = self._make_active_state("brand_new_market", "brand_new_group")
+        engine.analyze(new_state, bankroll=1000.0)
+
+        assert len(engine._group_states) == 500
+        assert oldest_group not in engine._group_states, "Oldest group should have been evicted"
+        assert "brand_new_group" in engine._group_states, "New group should be present"
+
+
+class TestMultilegGroupPositionLockedProfit:
+    """
+    Regression: _maybe_open_group_position for multileg_arb created a single-leg
+    GroupArbPosition with locked_profit = 1.0 - entry_price, which is wrong.
+    Profit is only locked once ALL mutually exclusive legs are filled.
+    """
+
+    def test_single_leg_multileg_fill_reports_zero_locked_profit(self):
+        """After a multileg YES fill, the group position must not claim fictitious profit."""
+        from unittest.mock import MagicMock
+        from core.execution import ExecutionEngine, ExecutionConfig
+        from core.portfolio import Portfolio
+        from core.risk_manager import RiskManager, RiskConfig
+        from polymarket_client.models import Trade, OrderSide, TokenType
+
+        portfolio = Portfolio(initial_balance=1000.0)
+        exec_engine = ExecutionEngine(
+            client=MagicMock(),
+            risk_manager=RiskManager(RiskConfig()),
+            portfolio=portfolio,
+            config=ExecutionConfig(dry_run=True),
+        )
+
+        # Simulate a YES fill at 0.20 for one leg of a 5-option NegRisk group
+        trade = Trade(
+            trade_id="t1", order_id="o1", market_id="market_leg_a",
+            token_type=TokenType.YES, side=OrderSide.BUY,
+            price=0.20, size=50.0, fee=0.0, strategy_tag="multileg_arb",
+        )
+        portfolio.update_from_fill(trade)
+
+        exec_engine._maybe_open_group_position("market_leg_a", "multileg_arb")
+
+        group = portfolio._open_group_arbs.get("market_leg_a")
+        assert group is not None, "GroupArbPosition should be registered for re-entry guard"
+        assert group.locked_profit == 0.0, (
+            f"Single-leg multileg position must have locked_profit=0.0, "
+            f"got {group.locked_profit:.4f} — a YES position at 0.20 does not lock "
+            f"profit until all 5 legs fill"
+        )
+        assert group.unrealized_pnl == 0.0

@@ -605,7 +605,9 @@ class ExecutionEngine:
         yes_pos = self.portfolio.get_position(market_id, TokenType.YES)
 
         if strategy_tag == "multileg_arb":
-            # Multileg: only a YES position per market; register as soon as it exists
+            # Multileg: only a YES position per market; register as soon as it exists.
+            # locked_profit=0.0 because profit is not locked until ALL legs of the
+            # NegRisk group fill — a single YES leg is still a directional exposure.
             if yes_pos and yes_pos.size > 0:
                 legs = [
                     GroupArbLeg(
@@ -619,6 +621,7 @@ class ExecutionEngine:
                     group_id=market_id,
                     legs=legs,
                     size=yes_pos.size,
+                    locked_profit=0.0,
                 )
         else:
             # bundle_arb: require both YES and NO legs before opening group

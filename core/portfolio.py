@@ -388,11 +388,22 @@ class Portfolio:
         return winners / len(self._closed_group_arbs)
 
     def open_group_position(
-        self, group_id: str, legs: list[GroupArbLeg], size: float
+        self,
+        group_id: str,
+        legs: list[GroupArbLeg],
+        size: float,
+        locked_profit: float | None = None,
     ) -> GroupArbPosition:
-        """Record a new group arb (bundle or categorical) opened."""
+        """Record a new group arb (bundle or categorical) opened.
+
+        ``locked_profit`` may be provided explicitly (e.g. 0.0 for a partial
+        multileg registration used only as a re-entry guard, where profit is
+        not yet locked because not all legs have filled).  When omitted it is
+        computed as ``1.0 - total_cost``.
+        """
         total_cost = sum(leg.entry_price for leg in legs)
-        locked_profit = 1.0 - total_cost
+        if locked_profit is None:
+            locked_profit = 1.0 - total_cost
         if locked_profit <= 0:
             logger.warning(
                 f"Group arb opened with locked_profit={locked_profit:.4f} (not profitable): "

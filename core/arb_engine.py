@@ -153,15 +153,17 @@ class ArbEngine:
 
         # Update group states for multi-leg arbs
         if group_id:
-            if group_id not in self._group_states:
+            is_new_group = group_id not in self._group_states
+            if is_new_group:
                 self._group_states[group_id] = {}
             self._group_states[group_id][market_id] = market_state
 
             # Evict resolved/closed markets from group tracking to prevent memory leak
             if market_state.market.resolved or market_state.market.closed:
                 self._group_states.pop(group_id, None)
-            # Cap total group count at 500 (insertion-ordered: first key is oldest)
-            elif len(self._group_states) >= 500:
+            # Cap total group count at 500 — only on new insertions to avoid evicting
+            # active groups when we're merely updating state for an existing group.
+            elif is_new_group and len(self._group_states) >= 500:
                 oldest_key = next(iter(self._group_states))
                 del self._group_states[oldest_key]
 
