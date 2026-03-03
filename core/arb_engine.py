@@ -162,7 +162,7 @@ class ArbEngine:
                 self._group_states.pop(group_id, None)
             # Cap total group count at 500: evict the oldest entry (dicts are
             # insertion-ordered in Python 3.7+, so the first key is oldest)
-            elif len(self._group_states) > 500:
+            elif len(self._group_states) >= 500:
                 oldest_key = next(iter(self._group_states))
                 del self._group_states[oldest_key]
 
@@ -185,7 +185,7 @@ class ArbEngine:
             # this group — without this guard every WebSocket tick to any member market
             # would call _check_multileg_arbitrage(), generating hundreds of signals per
             # minute and creating signal-queue back-pressure.
-            if group_id and len(self._group_states[group_id]) > 1 and bundle_signal is None:
+            if group_id and group_id in self._group_states and len(self._group_states[group_id]) > 1 and bundle_signal is None:
                 multileg_key = f"{group_id}_multileg_long"
                 if multileg_key not in self._active_opportunities:
                     multileg_signal = self._check_multileg_arbitrage(

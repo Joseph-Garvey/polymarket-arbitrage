@@ -469,6 +469,77 @@ class TestPortfolioAwareCooldown:
         assert len(bundle) == 1
 
 
+class TestMultilegResolvedMarketEviction:
+    """Regression tests for KeyError when a market resolves mid-analysis.
+
+    Scenario: engine has seen market_a and market_b in a group.  On the next
+    tick, market_a arrives with resolved=True.  The eviction branch runs
+    ``self._group_states.pop(group_id, None)``, deleting the group entry.
+    The multileg check that follows must NOT then do
+    ``len(self._group_states[group_id])`` on the now-deleted key.
+    """
+
+    def _make_state(
+        self, market_id: str, group_id: str, *, resolved: bool = False
+    ) -> "MarketState":
+        order_book = create_order_book(
+            market_id=market_id,
+            yes_bid=0.37,
+            yes_ask=0.40,
+            no_bid=0.58,
+            no_ask=0.62,
+            size=200.0,
+        )
+        return MarketState(
+            market=Market(
+                market_id=market_id,
+                condition_id=market_id,
+                question="Test Market",
+                active=not resolved,
+                volume_24h=50000.0,
+                group_id=group_id,
+                resolved=resolved,
+            ),
+            order_book=order_book,
+        )
+
+    def test_no_keyerror_when_market_resolves(self, arb_config: ArbConfig):
+        """No KeyError is raised when a grouped market resolves mid-analysis."""
+        engine = ArbEngine(arb_config)
+        group_id = "eviction_test_group"
+
+        # Seed the group with two active markets so _group_states[group_id]
+        # exists and has two entries.
+        engine.analyze(self._make_state("evict_market_a", group_id), bankroll=1000.0)
+        engine.analyze(self._make_state("evict_market_b", group_id), bankroll=1000.0)
+
+        assert group_id in engine._group_states, "Group should be present before resolution"
+
+        # Now send a resolved tick for market_a.  The eviction pop() removes the
+        # whole group, but the subsequent multileg check must not KeyError.
+        resolved_state = self._make_state("evict_market_a", group_id, resolved=True)
+        try:
+            signals = engine.analyze(resolved_state, bankroll=1000.0)
+        except KeyError as exc:
+            pytest.fail(
+                f"KeyError raised when market resolved mid-analysis: {exc}"
+            )
+
+        # After eviction the group must be gone from _group_states.
+        assert group_id not in engine._group_states, (
+            "Resolved group should have been evicted from _group_states"
+        )
+
+        # No multileg signal should have been generated for a resolved group.
+        multileg_signals = [
+            s for s in signals
+            if s.opportunity and s.opportunity.opportunity_type == OpportunityType.MULTILEG_LONG
+        ]
+        assert len(multileg_signals) == 0, (
+            f"Expected no multileg signal after resolution, got {len(multileg_signals)}"
+        )
+
+
 class TestMultilegReEntryGuard:
     """Tests for the _active_opportunities re-entry guard in multileg arb."""
 
