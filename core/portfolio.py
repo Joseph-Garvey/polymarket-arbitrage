@@ -45,7 +45,7 @@ class GroupArbPosition:
     legs: list[GroupArbLeg]
     size: float
     total_cost: float  # Sum of entry_prices (< 1.0 for a profitable long)
-    locked_profit: float  # 1.0 - total_cost (guaranteed at resolution)
+    locked_profit: float  # 1.0 - total_cost for fully-filled arbs; 0.0 for partial multileg placeholders
     opened_at: datetime
     status: str = "open"  # open, resolving, closed
 
@@ -404,11 +404,11 @@ class Portfolio:
         total_cost = sum(leg.entry_price for leg in legs)
         if locked_profit is None:
             locked_profit = 1.0 - total_cost
-        if locked_profit <= 0:
-            logger.warning(
-                f"Group arb opened with locked_profit={locked_profit:.4f} (not profitable): "
-                f"{group_id} | total_cost={total_cost:.4f}"
-            )
+            if locked_profit <= 0:
+                logger.warning(
+                    f"Group arb opened with locked_profit={locked_profit:.4f} (not profitable): "
+                    f"{group_id} | total_cost={total_cost:.4f}"
+                )
 
         group = GroupArbPosition(
             group_id=group_id,

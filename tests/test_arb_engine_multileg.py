@@ -1,11 +1,18 @@
 """
 Multi-leg arbitrage regression and unit tests.
 """
+from unittest.mock import MagicMock
+
 import pytest
-from polymarket_client.models import (
-    Market, MarketState, OrderBook, OrderBookSide, PriceLevel, TokenOrderBook, TokenType, OpportunityType,
-)
+
 from core.arb_engine import ArbEngine, ArbConfig
+from core.execution import ExecutionEngine, ExecutionConfig
+from core.portfolio import Portfolio, GroupArbLeg
+from core.risk_manager import RiskManager, RiskConfig
+from polymarket_client.models import (
+    Market, MarketState, OrderBook, OrderBookSide, PriceLevel, TokenOrderBook,
+    TokenType, OpportunityType, Trade, OrderSide,
+)
 
 
 @pytest.fixture
@@ -423,12 +430,6 @@ class TestMultilegGroupPositionLockedProfit:
 
     def test_single_leg_multileg_fill_reports_zero_locked_profit(self):
         """After a multileg YES fill, the group position must not claim fictitious profit."""
-        from unittest.mock import MagicMock
-        from core.execution import ExecutionEngine, ExecutionConfig
-        from core.portfolio import Portfolio
-        from core.risk_manager import RiskManager, RiskConfig
-        from polymarket_client.models import Trade, OrderSide, TokenType
-
         portfolio = Portfolio(initial_balance=1000.0)
         exec_engine = ExecutionEngine(
             client=MagicMock(),

@@ -354,10 +354,48 @@ class TestPortfolioSummary:
         """Test portfolio reset."""
         trade = create_trade()
         portfolio.update_from_fill(trade)
-        
+
         portfolio.reset()
-        
+
         assert portfolio.stats.total_trades == 0
         assert portfolio.get_total_exposure() == 0.0
         assert portfolio.cash_balance == 10000.0
+
+
+class TestOpenGroupPositionWarning:
+    """open_group_position must only warn when locked_profit is computed and negative,
+    not when the caller explicitly passes locked_profit=0.0."""
+
+    def _single_yes_leg(self, market_id: str = "m", price: float = 0.20) -> list[GroupArbLeg]:
+        return [GroupArbLeg(market_id, TokenType.YES, price, 50.0)]
+
+    def test_explicit_zero_locked_profit_does_not_warn(
+        self, portfolio: Portfolio, caplog: pytest.LogCaptureFixture
+    ):
+        """Passing locked_profit=0.0 explicitly must not emit a WARNING."""
+        with caplog.at_level(logging.WARNING, logger="core.portfolio"):
+            portfolio.open_group_position(
+                "g", self._single_yes_leg(), size=50.0, locked_profit=0.0
+            )
+
+        warning_texts = [r.message for r in caplog.records if r.levelno == logging.WARNING]
+        assert not any("not profitable" in t for t in warning_texts), (
+            f"Unexpected WARNING for explicit locked_profit=0.0: {warning_texts}"
+        )
+
+    def test_computed_negative_locked_profit_still_warns(
+        self, portfolio: Portfolio, caplog: pytest.LogCaptureFixture
+    ):
+        """When locked_profit is computed and comes out negative, the WARNING must still fire."""
+        legs = [
+            GroupArbLeg("m1", TokenType.YES, 0.55, 50.0),
+            GroupArbLeg("m2", TokenType.YES, 0.55, 50.0),
+        ]
+        with caplog.at_level(logging.WARNING, logger="core.portfolio"):
+            portfolio.open_group_position("g", legs, size=50.0)  # locked_profit = 1 - 1.10 = -0.10
+
+        warning_texts = [r.message for r in caplog.records if r.levelno == logging.WARNING]
+        assert any("not profitable" in t for t in warning_texts), (
+            "Expected WARNING when computed locked_profit < 0, but none was emitted"
+        )
 
