@@ -156,7 +156,7 @@ class ExecutionEngine:
             except asyncio.CancelledError:
                 raise
             except Exception as e:
-                logger.exception(f"Signal processing error: {e}")
+                logger.error(f"Signal processing error: {e}")
 
     async def _execute_signal(self, signal: Signal) -> None:
         """Execute a single trading signal."""
@@ -230,7 +230,7 @@ class ExecutionEngine:
             return order
 
         except Exception as e:
-            logger.exception(f"Failed to place order: {e}")
+            logger.error(f"Failed to place order: {e}")
             self.stats.orders_rejected += 1
             return None
 
@@ -245,7 +245,7 @@ class ExecutionEngine:
                     return
             proposed = Order(
                 order_id="temp",
-                market_id=signal.market_id,
+                market_id=order_spec.get("market_id", signal.market_id),
                 token_type=order_spec["token_type"],
                 side=order_spec["side"],
                 price=order_spec["price"],
@@ -351,7 +351,7 @@ class ExecutionEngine:
             try:
                 await self.cancel_order(order_id)
             except Exception as e:
-                logger.exception(f"Failed to cancel order {order_id}: {e}")
+                logger.error(f"Failed to cancel order {order_id}: {e}")
 
     def _check_slippage(self, opportunity, order_spec: dict) -> bool:
         """
@@ -535,7 +535,7 @@ class ExecutionEngine:
             except asyncio.CancelledError:
                 raise
             except Exception as e:
-                logger.exception(f"Order timeout monitor error: {e}")
+                logger.error(f"Order timeout monitor error: {e}")
 
     def handle_fill(self, trade: Trade) -> None:
         """Handle a trade fill notification."""
@@ -577,11 +577,9 @@ class ExecutionEngine:
 
         # If both legs of a bundle arb BUY are now filled, record the locked profit.
         # This enables correct PnL and prevents the kill switch from false-firing.
-        if (
-            getattr(trade, "strategy_tag", "") in ("bundle_arb", "multileg_arb")
-            and trade.side == OrderSide.BUY
-        ):
-            self._maybe_open_group_arb(trade.market_id)
+        # Also handle multileg_arb fills to register the re-entry guard.
+        if trade.strategy_tag in ("bundle_arb", "multileg_arb") and trade.side == OrderSide.BUY:
+            self._maybe_open_group_position(trade.market_id, trade.strategy_tag)
 
         # Update risk manager
         self.risk_manager.update_from_fill(trade)
@@ -591,28 +589,57 @@ class ExecutionEngine:
             f"{trade.side.value} {trade.size:.2f} {trade.token_type.value} @ {trade.price:.4f}"
         )
 
-    def _maybe_open_group_arb(self, market_id: str) -> None:
-        """Open a group arb on the portfolio once all legs are filled.
+    def _maybe_open_group_position(self, market_id: str, strategy_tag: str = "bundle_arb") -> None:
+        """Open an arb pair on the portfolio once the relevant legs are filled.
 
-        Currently handles standard 2-leg (YES+NO) arbs.
-        For categorical N-leg arbs, this would look up the group_id and verify
-        all group members have positions.
+        For bundle_arb: requires both YES and NO positions to exist before opening
+        the group (YES + NO sum < 1 guarantees locked profit).
+
+        For multileg_arb: each market holds only a YES position (one leg of a
+        multi-market bet). The re-entry guard uses _open_group_arbs membership, so
+        we add the market_id as soon as the YES position exists.
         """
-        # For now, we still use market_id as group_id for binary bundle arbs
-        group_id = market_id
-        if group_id in self.portfolio._open_group_arbs:
-            return
+        if market_id in self.portfolio._open_group_arbs:
+            return  # Already tracking this market
 
         yes_pos = self.portfolio.get_position(market_id, TokenType.YES)
-        no_pos = self.portfolio.get_position(market_id, TokenType.NO)
 
-        if yes_pos and no_pos and yes_pos.size > 0 and no_pos.size > 0:
-            size = min(yes_pos.size, no_pos.size)
-            legs = [
-                GroupArbLeg(market_id, TokenType.YES, yes_pos.avg_entry_price, size),
-                GroupArbLeg(market_id, TokenType.NO, no_pos.avg_entry_price, size),
-            ]
-            self.portfolio.open_group_position(group_id, legs, size)
+        if strategy_tag == "multileg_arb":
+            # Multileg: only a YES position per market; register as soon as it exists
+            if yes_pos and yes_pos.size > 0:
+                legs = [
+                    GroupArbLeg(
+                        market_id=market_id,
+                        token_type=TokenType.YES,
+                        entry_price=yes_pos.avg_entry_price,
+                        size=yes_pos.size,
+                    )
+                ]
+                self.portfolio.open_group_position(
+                    group_id=market_id,
+                    legs=legs,
+                    size=yes_pos.size,
+                )
+        else:
+            # bundle_arb: require both YES and NO legs before opening group
+            no_pos = self.portfolio.get_position(market_id, TokenType.NO)
+            if yes_pos and no_pos and yes_pos.size > 0 and no_pos.size > 0:
+                size = min(yes_pos.size, no_pos.size)
+                legs = [
+                    GroupArbLeg(
+                        market_id=market_id,
+                        token_type=TokenType.YES,
+                        entry_price=yes_pos.avg_entry_price,
+                        size=size,
+                    ),
+                    GroupArbLeg(
+                        market_id=market_id,
+                        token_type=TokenType.NO,
+                        entry_price=no_pos.avg_entry_price,
+                        size=size,
+                    ),
+                ]
+                self.portfolio.open_group_position(market_id, legs, size)
 
     def get_open_orders(self, market_id: Optional[str] = None) -> list[Order]:
         """Get all open orders, optionally filtered by market."""
