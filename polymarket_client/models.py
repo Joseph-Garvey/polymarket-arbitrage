@@ -288,6 +288,7 @@ class Trade:
     price: float
     size: float
     fee: float = 0.0
+    strategy_tag: str = ""
     timestamp: datetime = field(default_factory=datetime.utcnow)
 
     @property

@@ -438,6 +438,40 @@ class Portfolio:
             "total_volume": self.stats.total_volume,
             "positions_count": sum(len(tokens) for tokens in self._positions.values()),
             "markets_traded": len(self._positions),
+            "open_group_arbs": {
+                gid: {
+                    "group_id": group.group_id,
+                    "legs": [
+                        {
+                            "market_id": leg.market_id,
+                            "token_type": leg.token_type.value,
+                            "entry_price": leg.entry_price,
+                            "size": leg.size,
+                        }
+                        for leg in group.legs
+                    ],
+                    "size": group.size,
+                    "total_cost": group.total_cost,
+                    "locked_profit": group.locked_profit,
+                    "status": group.status,
+                }
+                for gid, group in self._open_group_arbs.items()
+            },
+            "positions": {
+                mid: {
+                    tt.value: {
+                        "size": pos.size,
+                        "avg_entry_price": pos.avg_entry_price,
+                        "unrealized_pnl": pos.unrealized_pnl(
+                            self._current_prices.get(mid, {}).get(
+                                tt, pos.avg_entry_price
+                            )
+                        ),
+                    }
+                    for tt, pos in tokens.items()
+                }
+                for mid, tokens in self._positions.items()
+            },
         }
 
     def get_all_positions(self) -> dict[str, dict[TokenType, PortfolioPosition]]:

@@ -105,6 +105,8 @@ class TradingBotWithDashboard:
             # Initialize cross-platform arbitrage engine
             self.cross_platform_engine = CrossPlatformArbEngine(
                 min_edge=self.config.trading.min_edge,
+                openrouter_api_key=self.config.api.openrouter_api_key,
+                openrouter_model=self.config.api.openrouter_model,
             )
             self.market_matcher = self.cross_platform_engine.matcher
 
@@ -523,15 +525,15 @@ class TradingBotWithDashboard:
 
         # Cross-platform summary
         if self.cross_platform_engine:
-            cp_stats = self.cross_platform_engine.get_stats()
+            cp_stats = dashboard_state.cross_platform
             pm_stats = self.arb_engine.stats
             logger.info(
                 f"Polymarket Intramarket Opportunities Detected: {pm_stats.bundle_opportunities_detected}"
             )
             logger.info(
-                f"Cross-Platform Opportunities: {cp_stats['total_opportunities']}"
+                f"Cross-Platform Opportunities: {cp_stats.get('total_opportunities', 0)}"
             )
-            logger.info(f"Matched Market Pairs: {cp_stats['matched_pairs']}")
+            logger.info(f"Matched Market Pairs: {cp_stats.get('matched_pairs', 0)}")
 
         logger.info("Shutdown complete")
 

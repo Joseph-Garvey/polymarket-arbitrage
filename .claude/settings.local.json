@@ -1,0 +1,11 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python:*)",
+      "Bash(.venv/Scripts/python:*)",
+      "Bash(pip install:*)",
+      "Bash(gh repo:*)",
+      "Bash(/c/Users/josep/AppData/Local/Programs/Python/Python311/python:*)"
+    ]
+  }
+}

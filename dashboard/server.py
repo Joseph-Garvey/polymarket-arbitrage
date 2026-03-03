@@ -59,13 +59,19 @@ class DashboardState:
     def to_dict(self) -> dict:
         """Convert state to dictionary for JSON serialization."""
         uptime = (datetime.utcnow() - self.started_at).total_seconds()
+
+        # Format portfolio properly for the dashboard
+        portfolio_data = self.portfolio.copy()
+        if "positions" not in portfolio_data:
+            portfolio_data["positions"] = {}
+
         return {
             "markets": self.markets,
             "opportunities": self.opportunities[-50:],  # Last 50
             "signals": self.signals[-50:],
             "orders": self.orders,
             "trades": self.trades[-100:],  # Last 100
-            "portfolio": self.portfolio,
+            "portfolio": portfolio_data,
             "risk": self.risk,
             "stats": self.stats,
             "timing": self.timing,  # Opportunity timing stats
@@ -1673,14 +1679,8 @@ def get_embedded_html() -> str:
                 modeBadge.textContent = 'DRY RUN';
             }
             
-            // Metrics
-            updateMetrics();
-            
-            // Opportunities
-            updateOpportunities();
-            
-            // Activity
-            updateActivity();
+            // Portfolio
+            updatePortfolio();
             
             // Risk
             updateRisk();
@@ -1792,6 +1792,67 @@ def get_embedded_html() -> str:
                     </div>
                 `;
             }).join('');
+        }
+        
+        function updatePortfolio() {
+            const list = document.getElementById('positionList');
+            const portfolio = state.portfolio || {};
+            const openGroupArbs = portfolio.open_group_arbs || {};
+            const positions = state.portfolio.positions || {};
+            
+            let html = '';
+            
+            // Render Grouped Arbs first
+            Object.values(openGroupArbs).forEach(group => {
+                const lockedProfit = (group.locked_profit * group.size).toFixed(2);
+                html += `
+                    <div class="position-item" style="border-left: 3px solid var(--accent-green); padding-left: 8px; background: rgba(0, 255, 136, 0.05);">
+                        <div class="position-market">
+                            <span style="color: var(--accent-green); font-weight: bold;">[GROUP]</span> 
+                            ${truncate(group.group_id, 40)}
+                            <div style="font-size: 0.7rem; color: var(--text-secondary);">
+                                ${group.legs.length} legs | Locked: $${lockedProfit}
+                            </div>
+                        </div>
+                        <div class="position-size">${group.size.toFixed(2)}</div>
+                        <div class="position-pnl positive">$${lockedProfit}</div>
+                    </div>
+                `;
+            });
+            
+            // Identify markets that are part of a group to avoid double-counting
+            const groupedMarkets = new Set();
+            Object.values(openGroupArbs).forEach(group => {
+                group.legs.forEach(leg => groupedMarkets.add(`${leg.market_id}_${leg.token_type}`));
+            });
+            
+            // Render individual positions
+            Object.entries(positions).forEach(([marketId, tokens]) => {
+                Object.entries(tokens).forEach(([tokenType, pos]) => {
+                    if (groupedMarkets.has(`${marketId}_${tokenType}`)) return;
+                    if (Math.abs(pos.size) < 0.01) return;
+                    
+                    const pnl = pos.unrealized_pnl || 0;
+                    html += `
+                        <div class="position-item">
+                            <div class="position-market">
+                                <span style="color: ${tokenType === 'yes' ? 'var(--accent-green)' : 'var(--accent-red)'}; font-weight: bold;">
+                                    ${tokenType.toUpperCase()}
+                                </span> 
+                                ${truncate(marketId, 40)}
+                            </div>
+                            <div class="position-size">${pos.size.toFixed(2)}</div>
+                            <div class="position-pnl ${pnl >= 0 ? 'positive' : 'negative'}">$${pnl.toFixed(2)}</div>
+                        </div>
+                    `;
+                });
+            });
+            
+            if (!html) {
+                list.innerHTML = '<div class="empty-state"><div class="empty-icon">💼</div><div>No open positions</div></div>';
+            } else {
+                list.innerHTML = html;
+            }
         }
         
         function updateRisk() {

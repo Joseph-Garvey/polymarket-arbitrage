@@ -25,7 +25,7 @@ from polymarket_client.models import (
     Trade,
 )
 from core.risk_manager import RiskManager
-from core.portfolio import Portfolio
+from core.portfolio import Portfolio, GroupArbLeg
 
 
 logger = logging.getLogger(__name__)
@@ -578,10 +578,10 @@ class ExecutionEngine:
         # If both legs of a bundle arb BUY are now filled, record the locked profit.
         # This enables correct PnL and prevents the kill switch from false-firing.
         if (
-            getattr(trade, "strategy_tag", "") == "bundle_arb"
+            getattr(trade, "strategy_tag", "") in ("bundle_arb", "multileg_arb")
             and trade.side == OrderSide.BUY
         ):
-            self._maybe_open_arb_pair(trade.market_id)
+            self._maybe_open_group_arb(trade.market_id)
 
         # Update risk manager
         self.risk_manager.update_from_fill(trade)
@@ -591,21 +591,28 @@ class ExecutionEngine:
             f"{trade.side.value} {trade.size:.2f} {trade.token_type.value} @ {trade.price:.4f}"
         )
 
-    def _maybe_open_arb_pair(self, market_id: str) -> None:
-        """Open an arb pair on the portfolio once both YES and NO legs are filled."""
-        if market_id in self.portfolio._open_arb_pairs:
-            return  # Already tracking this pair
+    def _maybe_open_group_arb(self, market_id: str) -> None:
+        """Open a group arb on the portfolio once all legs are filled.
+
+        Currently handles standard 2-leg (YES+NO) arbs.
+        For categorical N-leg arbs, this would look up the group_id and verify
+        all group members have positions.
+        """
+        # For now, we still use market_id as group_id for binary bundle arbs
+        group_id = market_id
+        if group_id in self.portfolio._open_group_arbs:
+            return
 
         yes_pos = self.portfolio.get_position(market_id, TokenType.YES)
         no_pos = self.portfolio.get_position(market_id, TokenType.NO)
 
         if yes_pos and no_pos and yes_pos.size > 0 and no_pos.size > 0:
-            self.portfolio.open_arb_pair(
-                market_id=market_id,
-                yes_entry=yes_pos.avg_entry_price,
-                no_entry=no_pos.avg_entry_price,
-                size=min(yes_pos.size, no_pos.size),
-            )
+            size = min(yes_pos.size, no_pos.size)
+            legs = [
+                GroupArbLeg(market_id, TokenType.YES, yes_pos.avg_entry_price, size),
+                GroupArbLeg(market_id, TokenType.NO, no_pos.avg_entry_price, size),
+            ]
+            self.portfolio.open_group_position(group_id, legs, size)
 
     def get_open_orders(self, market_id: Optional[str] = None) -> list[Order]:
         """Get all open orders, optionally filtered by market."""

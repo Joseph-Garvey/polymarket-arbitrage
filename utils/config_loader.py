@@ -11,6 +11,10 @@ from pathlib import Path
 from typing import Any, Optional
 
 import yaml
+from dotenv import load_dotenv
+
+# Load environment variables from .env file
+load_dotenv()
 
 
 class ConfigError(Exception):
@@ -31,6 +35,8 @@ class ApiConfig:
     api_secret: str = ""
     passphrase: str = ""
     private_key: str = ""
+    openrouter_api_key: str = ""
+    openrouter_model: str = ""
     timeout_seconds: float = 30.0
     max_retries: int = 3
     retry_delay_seconds: float = 1.0
@@ -181,6 +187,8 @@ def load_config(config_path: str = "config.yaml") -> BotConfig:
             "api_secret": "POLYMARKET_API_SECRET",
             "passphrase": "POLYMARKET_PASSPHRASE",
             "private_key": "POLYMARKET_PRIVATE_KEY",
+            "openrouter_api_key": "OPENROUTER_API_KEY",
+            "openrouter_model": "OPENROUTER_MODEL",
         },
     )
 
