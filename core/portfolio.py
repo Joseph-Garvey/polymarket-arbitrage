@@ -10,61 +10,77 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Optional
 
-from polymarket_client.models import Order, OrderSide, OrderStatus, Position, TokenType, Trade
+from polymarket_client.models import (
+    Order,
+    OrderSide,
+    OrderStatus,
+    Position,
+    TokenType,
+    Trade,
+)
 
 
 logger = logging.getLogger(__name__)
 
 
 @dataclass
-class ArbPairPosition:
-    """
-    Tracks a bundle arbitrage pair (YES + NO legs) as a single unit.
+class GroupArbLeg:
+    """Single leg of a grouped arbitrage position."""
 
-    Because both legs will show unrealised losses until resolution, tracking
-    them individually makes PnL look negative even when the profit is locked.
-    This dataclass represents the guaranteed outcome correctly.
-    """
     market_id: str
-    yes_entry: float    # Price paid for YES leg
-    no_entry: float     # Price paid for NO leg
+    token_type: TokenType
+    entry_price: float
     size: float
-    total_cost: float   # yes_entry + no_entry (< 1.0 for a profitable bundle long)
+
+
+@dataclass
+class GroupArbPosition:
+    """
+    Tracks a multi-leg arbitrage group as a single unit.
+
+    Supports both 2-leg (YES+NO) and N-leg (Categorical) arbs.
+    """
+
+    group_id: str
+    legs: list[GroupArbLeg]
+    size: float
+    total_cost: float  # Sum of entry_prices (< 1.0 for a profitable long)
     locked_profit: float  # 1.0 - total_cost (guaranteed at resolution)
     opened_at: datetime
     status: str = "open"  # open, resolving, closed
 
     @property
     def unrealized_pnl(self) -> float:
-        """Profit is locked at entry for bundle arb — return it unconditionally."""
+        """Profit is locked at entry — return it unconditionally."""
         return self.locked_profit * self.size
 
 
 @dataclass
 class PortfolioPosition:
     """Extended position tracking with PnL."""
+
     market_id: str
     token_type: TokenType
     size: float = 0.0
     avg_entry_price: float = 0.0
     realized_pnl: float = 0.0
     cost_basis: float = 0.0
-    
+
     # Trade history
     total_bought: float = 0.0
     total_sold: float = 0.0
     trade_count: int = 0
-    
+
     def unrealized_pnl(self, current_price: float) -> float:
         """Calculate unrealized PnL at current price."""
         if self.size == 0:
             return 0.0
         return self.size * (current_price - self.avg_entry_price)
-    
+
     def total_pnl(self, current_price: float) -> float:
         """Calculate total PnL (realized + unrealized)."""
         return self.realized_pnl + self.unrealized_pnl(current_price)
-    
+
     @property
     def notional(self) -> float:
         """Current position notional value."""
@@ -74,6 +90,7 @@ class PortfolioPosition:
 @dataclass
 class PortfolioStats:
     """Portfolio-level statistics."""
+
     total_realized_pnl: float = 0.0
     total_unrealized_pnl: float = 0.0
     total_fees_paid: float = 0.0
@@ -103,10 +120,10 @@ class PortfolioStats:
 class Portfolio:
     """
     Portfolio and inventory tracking.
-    
+
     Maintains positions per market/token and calculates PnL.
     """
-    
+
     def __init__(self, initial_balance: float = 0.0):
         self.initial_balance = initial_balance
         self.cash_balance = initial_balance
@@ -114,9 +131,9 @@ class Portfolio:
         # Positions: market_id -> token_type -> PortfolioPosition
         self._positions: dict[str, dict[TokenType, PortfolioPosition]] = {}
 
-        # Arb pair tracking (open and closed)
-        self._open_arb_pairs: dict[str, ArbPairPosition] = {}
-        self._closed_arb_pairs: list[ArbPairPosition] = []
+        # Group arb tracking (open and closed)
+        self._open_group_arbs: dict[str, GroupArbPosition] = {}
+        self._closed_group_arbs: list[GroupArbPosition] = []
 
         # Trade history
         self._trades: list[Trade] = []
@@ -131,57 +148,59 @@ class Portfolio:
         self._bundle_signals: dict[str, list[Order]] = {}
 
         logger.info(f"Portfolio initialized with balance: {initial_balance}")
-    
+
     def update_from_fill(self, trade: Trade) -> None:
         """Update portfolio from a trade fill."""
         market_id = trade.market_id
         token_type = trade.token_type
-        
+
         # Ensure position exists
         if market_id not in self._positions:
             self._positions[market_id] = {}
-        
+
         if token_type not in self._positions[market_id]:
             self._positions[market_id][token_type] = PortfolioPosition(
                 market_id=market_id,
                 token_type=token_type,
             )
-        
+
         position = self._positions[market_id][token_type]
-        
+
         # Process based on side
         if trade.side == OrderSide.BUY:
             self._process_buy(position, trade)
         else:
             self._process_sell(position, trade)
-        
+
         # Update trade count
         position.trade_count += 1
-        
+
         # Update cash (simplified)
         if trade.side == OrderSide.BUY:
             self.cash_balance -= trade.net_cost
         else:
             self.cash_balance += trade.notional - trade.fee
-        
+
         # Track trade
         self._trades.append(trade)
         self.stats.total_trades += 1
         self.stats.total_fees_paid += trade.fee
         self.stats.total_volume += trade.notional
-        
+
         logger.debug(
             f"Portfolio updated: {market_id}/{token_type.value} | "
             f"size={position.size:.4f} @ avg={position.avg_entry_price:.4f}"
         )
-    
+
     def _process_buy(self, position: PortfolioPosition, trade: Trade) -> None:
         """Process a buy trade."""
         new_size = position.size + trade.size
-        
+
         if position.size >= 0:
             # Adding to long position
-            total_cost = (position.avg_entry_price * position.size) + (trade.price * trade.size)
+            total_cost = (position.avg_entry_price * position.size) + (
+                trade.price * trade.size
+            )
             position.avg_entry_price = total_cost / new_size if new_size > 0 else 0
             position.cost_basis += trade.net_cost
         else:
@@ -191,7 +210,7 @@ class Portfolio:
                 realized = (position.avg_entry_price - trade.price) * trade.size
                 position.realized_pnl += realized
                 self.stats.total_realized_pnl += realized
-                
+
                 if realized > 0:
                     self.stats.winning_trades += 1
                 else:
@@ -202,24 +221,24 @@ class Portfolio:
                 realized = (position.avg_entry_price - trade.price) * short_size
                 position.realized_pnl += realized
                 self.stats.total_realized_pnl += realized
-                
+
                 # New long portion
                 long_size = trade.size - short_size
                 position.avg_entry_price = trade.price
                 position.cost_basis = long_size * trade.price
-                
+
                 if realized > 0:
                     self.stats.winning_trades += 1
                 else:
                     self.stats.losing_trades += 1
-        
+
         position.size = new_size
         position.total_bought += trade.size
-    
+
     def _process_sell(self, position: PortfolioPosition, trade: Trade) -> None:
         """Process a sell trade."""
         new_size = position.size - trade.size
-        
+
         if position.size > 0:
             # Reducing long position
             if trade.size <= position.size:
@@ -227,7 +246,7 @@ class Portfolio:
                 realized = (trade.price - position.avg_entry_price) * trade.size
                 position.realized_pnl += realized
                 self.stats.total_realized_pnl += realized
-                
+
                 if realized > 0:
                     self.stats.winning_trades += 1
                 else:
@@ -238,37 +257,41 @@ class Portfolio:
                 realized = (trade.price - position.avg_entry_price) * long_size
                 position.realized_pnl += realized
                 self.stats.total_realized_pnl += realized
-                
+
                 # New short portion
                 short_size = trade.size - long_size
                 position.avg_entry_price = trade.price
                 position.cost_basis = short_size * trade.price
-                
+
                 if realized > 0:
                     self.stats.winning_trades += 1
                 else:
                     self.stats.losing_trades += 1
         else:
             # Adding to short position
-            total_value = (position.avg_entry_price * abs(position.size)) + (trade.price * trade.size)
+            total_value = (position.avg_entry_price * abs(position.size)) + (
+                trade.price * trade.size
+            )
             new_short_size = abs(new_size)
-            position.avg_entry_price = total_value / new_short_size if new_short_size > 0 else 0
+            position.avg_entry_price = (
+                total_value / new_short_size if new_short_size > 0 else 0
+            )
             position.cost_basis += trade.notional
-        
+
         position.size = new_size
         position.total_sold += trade.size
-    
+
     def update_prices(self, market_id: str, yes_price: float, no_price: float) -> None:
         """Update current prices for unrealized PnL calculation."""
         if market_id not in self._current_prices:
             self._current_prices[market_id] = {}
-        
+
         self._current_prices[market_id][TokenType.YES] = yes_price
         self._current_prices[market_id][TokenType.NO] = no_price
-        
+
         # Recalculate unrealized PnL
         self._recalculate_unrealized_pnl()
-    
+
     def _recalculate_unrealized_pnl(self) -> None:
         """Recalculate total unrealized PnL.
 
@@ -279,31 +302,36 @@ class Portfolio:
         """
         total = 0.0
 
-        # Markets that belong to an open arb pair — skip their individual legs
-        arb_market_ids = set(self._open_arb_pairs.keys())
+        # Markets that belong to an open group arb — skip their individual legs
+        arb_market_ids = set()
+        for group in self._open_group_arbs.values():
+            for leg in group.legs:
+                arb_market_ids.add((leg.market_id, leg.token_type))
 
         for market_id, tokens in self._positions.items():
-            if market_id in arb_market_ids:
-                continue  # Handled below via locked_profit
             if market_id not in self._current_prices:
                 continue
             for token_type, position in tokens.items():
+                if (market_id, token_type) in arb_market_ids:
+                    continue  # Handled below via locked_profit
                 if token_type in self._current_prices[market_id]:
                     current_price = self._current_prices[market_id][token_type]
                     total += position.unrealized_pnl(current_price)
 
-        # Add locked profit from open arb pairs
-        for pair in self._open_arb_pairs.values():
-            total += pair.unrealized_pnl
+        # Add locked profit from open group arbs
+        for group in self._open_group_arbs.values():
+            total += group.unrealized_pnl
 
         self.stats.total_unrealized_pnl = total
-    
-    def get_position(self, market_id: str, token_type: TokenType) -> Optional[PortfolioPosition]:
+
+    def get_position(
+        self, market_id: str, token_type: TokenType
+    ) -> Optional[PortfolioPosition]:
         """Get a specific position."""
         if market_id not in self._positions:
             return None
         return self._positions[market_id].get(token_type)
-    
+
     def get_exposure(self, market_id: str) -> dict:
         """Get exposure breakdown for a market."""
         if market_id not in self._positions:
@@ -315,15 +343,15 @@ class Portfolio:
                 "total_notional": 0.0,
                 "net_position": 0.0,
             }
-        
+
         yes_pos = self._positions[market_id].get(TokenType.YES)
         no_pos = self._positions[market_id].get(TokenType.NO)
-        
+
         yes_size = yes_pos.size if yes_pos else 0.0
         no_size = no_pos.size if no_pos else 0.0
         yes_notional = yes_pos.notional if yes_pos else 0.0
         no_notional = no_pos.notional if no_pos else 0.0
-        
+
         return {
             "yes_size": yes_size,
             "no_size": no_size,
@@ -332,7 +360,7 @@ class Portfolio:
             "total_notional": yes_notional + no_notional,
             "net_position": yes_size - no_size,
         }
-    
+
     def get_total_exposure(self) -> float:
         """Get total notional exposure across all markets."""
         total = 0.0
@@ -340,7 +368,7 @@ class Portfolio:
             for position in tokens.values():
                 total += position.notional
         return total
-    
+
     def get_pnl(self) -> dict:
         """Get PnL breakdown."""
         return {
@@ -350,47 +378,52 @@ class Portfolio:
             "fees_paid": self.stats.total_fees_paid,
             "net_pnl": self.stats.total_pnl - self.stats.total_fees_paid,
         }
-    
+
     @property
     def arb_win_rate(self) -> float:
-        """Percentage of completed arb pairs that resolved profitably."""
-        if not self._closed_arb_pairs:
+        """Percentage of completed group arbs that resolved profitably."""
+        if not self._closed_group_arbs:
             return 0.0
-        winners = sum(1 for p in self._closed_arb_pairs if p.locked_profit > 0)
-        return winners / len(self._closed_arb_pairs)
+        winners = sum(1 for p in self._closed_group_arbs if p.locked_profit > 0)
+        return winners / len(self._closed_group_arbs)
 
-    def open_arb_pair(self, market_id: str, yes_entry: float, no_entry: float, size: float) -> ArbPairPosition:
-        """Record a new bundle arb pair opened at the given entry prices."""
-        total_cost = yes_entry + no_entry
+    def open_group_position(
+        self, group_id: str, legs: list[GroupArbLeg], size: float
+    ) -> GroupArbPosition:
+        """Record a new group arb (bundle or categorical) opened."""
+        total_cost = sum(leg.entry_price for leg in legs)
         locked_profit = 1.0 - total_cost
         if locked_profit <= 0:
             logger.warning(
-                f"Arb pair opened with locked_profit={locked_profit:.4f} (not profitable): "
-                f"{market_id} | yes={yes_entry} no={no_entry} total_cost={total_cost:.4f}"
+                f"Group arb opened with locked_profit={locked_profit:.4f} (not profitable): "
+                f"{group_id} | total_cost={total_cost:.4f}"
             )
-        pair = ArbPairPosition(
-            market_id=market_id,
-            yes_entry=yes_entry,
-            no_entry=no_entry,
+
+        group = GroupArbPosition(
+            group_id=group_id,
+            legs=legs,
             size=size,
             total_cost=total_cost,
             locked_profit=locked_profit,
             opened_at=datetime.utcnow(),
         )
-        self._open_arb_pairs[market_id] = pair
+        self._open_group_arbs[group_id] = group
         logger.info(
-            f"Arb pair opened: {market_id} | cost={total_cost:.4f} | locked_profit={locked_profit:.4f} | size={size}"
+            f"Group arb opened: {group_id} | cost={total_cost:.4f} | "
+            f"locked_profit={locked_profit:.4f} | size={size} | legs={len(legs)}"
         )
-        return pair
+        return group
 
-    def close_arb_pair(self, market_id: str) -> Optional[ArbPairPosition]:
-        """Mark an open arb pair as closed (e.g. on market resolution)."""
-        pair = self._open_arb_pairs.pop(market_id, None)
-        if pair:
-            pair.status = "closed"
-            self._closed_arb_pairs.append(pair)
-            logger.info(f"Arb pair closed: {market_id} | locked_profit={pair.locked_profit:.4f}")
-        return pair
+    def close_group_position(self, group_id: str) -> Optional[GroupArbPosition]:
+        """Mark an open group arb as closed (e.g. on market resolution)."""
+        group = self._open_group_arbs.pop(group_id, None)
+        if group:
+            group.status = "closed"
+            self._closed_group_arbs.append(group)
+            logger.info(
+                f"Group arb closed: {group_id} | locked_profit={group.locked_profit:.4f}"
+            )
+        return group
 
     def get_summary(self) -> dict:
         """Get portfolio summary."""
@@ -403,20 +436,18 @@ class Portfolio:
             "win_rate": self.stats.win_rate,
             "arb_win_rate": self.arb_win_rate,
             "total_volume": self.stats.total_volume,
-            "positions_count": sum(
-                len(tokens) for tokens in self._positions.values()
-            ),
+            "positions_count": sum(len(tokens) for tokens in self._positions.values()),
             "markets_traded": len(self._positions),
         }
-    
+
     def get_all_positions(self) -> dict[str, dict[TokenType, PortfolioPosition]]:
         """Get all positions."""
         return self._positions.copy()
-    
+
     def get_recent_trades(self, limit: int = 50) -> list[Trade]:
         """Get recent trades."""
         return self._trades[-limit:]
-    
+
     def register_bundle_signal(self, signal_id: str, orders: list[Order]) -> None:
         """Register the placed orders for a bundle arb signal for completion tracking."""
         self._bundle_signals[signal_id] = list(orders)
@@ -447,11 +478,11 @@ class Portfolio:
         """Reset portfolio to initial state."""
         self._positions = {}
         self._trades = []
-        self._open_arb_pairs = {}
-        self._closed_arb_pairs = []
+        self._open_group_arbs = {}
+        self._closed_group_arbs = []
         self.cash_balance = self.initial_balance
+
         self.stats = PortfolioStats()
         self._current_prices = {}
         self._bundle_signals = {}
         logger.info("Portfolio reset")
-
