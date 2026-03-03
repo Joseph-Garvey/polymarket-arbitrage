@@ -293,6 +293,132 @@ class TestEdgeCases:
         assert isinstance(signals, list)
 
 
+class TestMultilegDoubleSignalBug:
+    """Regression tests for the double-signal bug in 2-market NegRisk groups."""
+
+    def _make_bundle_profitable_state(self, market_id: str, group_id: str) -> "MarketState":
+        """
+        Create a market state whose YES+NO asks are both cheap enough to trigger
+        a BUNDLE_LONG signal (total_ask = 0.95, 5% edge) AND whose YES ask is cheap
+        enough to potentially contribute to a MULTILEG_LONG.
+        """
+        order_book = create_order_book(
+            market_id=market_id,
+            yes_bid=0.43,
+            yes_ask=0.45,
+            no_bid=0.48,
+            no_ask=0.50,
+        )
+        return MarketState(
+            market=Market(
+                market_id=market_id,
+                condition_id=market_id,
+                question="Test Market",
+                active=True,
+                volume_24h=50000.0,
+                group_id=group_id,
+            ),
+            order_book=order_book,
+        )
+
+    def test_no_double_signal_when_bundle_fires_in_2market_group(self, arb_config: ArbConfig):
+        """
+        When a market belongs to a 2-market NegRisk group and a BUNDLE_LONG is
+        detected, the engine must NOT also emit a MULTILEG_LONG for the same call.
+        Emitting both would double the exposure on the same legs.
+        """
+        engine = ArbEngine(arb_config)
+
+        group_id = "neg_risk_group_1"
+        state_a = self._make_bundle_profitable_state("market_a", group_id)
+        state_b = self._make_bundle_profitable_state("market_b", group_id)
+
+        # Feed market_b first so the group has 2 states when we analyze market_a
+        engine.analyze(state_b, bankroll=1000.0)
+
+        # Analyze market_a — this has both a bundle and a potential multileg opportunity
+        signals = engine.analyze(state_a, bankroll=1000.0)
+
+        bundle_signals = [
+            s for s in signals if s.opportunity and s.opportunity.opportunity_type
+            in (OpportunityType.BUNDLE_LONG, OpportunityType.BUNDLE_SHORT)
+        ]
+        multileg_signals = [
+            s for s in signals if s.opportunity and s.opportunity.opportunity_type
+            == OpportunityType.MULTILEG_LONG
+        ]
+
+        # Bundle should fire
+        assert len(bundle_signals) == 1, (
+            f"Expected 1 bundle signal, got {len(bundle_signals)}"
+        )
+        # Multileg must NOT fire when bundle already fired for this market
+        assert len(multileg_signals) == 0, (
+            f"Double-signal bug: got {len(multileg_signals)} MULTILEG_LONG signal(s) "
+            f"in the same call that produced a BUNDLE_LONG signal"
+        )
+
+    def test_multileg_still_fires_when_no_bundle_signal(self, arb_config: ArbConfig):
+        """
+        When a market belongs to a group but does NOT trigger a bundle signal,
+        the multileg check should still run normally.
+        """
+        engine = ArbEngine(arb_config)
+
+        group_id = "neg_risk_group_2"
+
+        # Build states where YES asks across the two markets sum to < 1 (multileg arb)
+        # but each individual YES+NO pair does NOT have a bundle edge (total_ask >= 1).
+        def _multileg_only_state(market_id: str) -> "MarketState":
+            # YES ask = 0.40, NO ask = 0.62 -> total_ask = 1.02 (no bundle long)
+            # YES bid = 0.37, NO bid = 0.58 -> total_bid = 0.95 (no bundle short)
+            # Two markets with YES ask 0.40 each -> total YES ask = 0.80 -> multileg edge
+            order_book = create_order_book(
+                market_id=market_id,
+                yes_bid=0.37,
+                yes_ask=0.40,
+                no_bid=0.58,
+                no_ask=0.62,
+                size=200.0,
+            )
+            return MarketState(
+                market=Market(
+                    market_id=market_id,
+                    condition_id=market_id,
+                    question="Test Market",
+                    active=True,
+                    volume_24h=50000.0,
+                    group_id=group_id,
+                ),
+                order_book=order_book,
+            )
+
+        state_c = _multileg_only_state("market_c")
+        state_d = _multileg_only_state("market_d")
+
+        # Seed the group with the first market
+        engine.analyze(state_c, bankroll=1000.0)
+
+        # Analyze second market — expect a multileg signal, no bundle signal
+        signals = engine.analyze(state_d, bankroll=1000.0)
+
+        bundle_signals = [
+            s for s in signals if s.opportunity and s.opportunity.opportunity_type
+            in (OpportunityType.BUNDLE_LONG, OpportunityType.BUNDLE_SHORT)
+        ]
+        multileg_signals = [
+            s for s in signals if s.opportunity and s.opportunity.opportunity_type
+            == OpportunityType.MULTILEG_LONG
+        ]
+
+        assert len(bundle_signals) == 0, (
+            f"Expected no bundle signal for this book, got {len(bundle_signals)}"
+        )
+        assert len(multileg_signals) == 1, (
+            f"Expected 1 multileg signal, got {len(multileg_signals)}"
+        )
+
+
 class TestPortfolioAwareCooldown:
     """Tests for portfolio-gated re-entry suppression."""
 

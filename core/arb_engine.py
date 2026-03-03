@@ -168,8 +168,11 @@ class ArbEngine:
             if bundle_signal:
                 signals.append(bundle_signal)
 
-            # Check for multi-leg arbitrage if this market belongs to a group
-            if group_id and len(self._group_states[group_id]) > 1:
+            # Check for multi-leg arbitrage if this market belongs to a group.
+            # Skip if bundle_signal was already generated for this market — a 2-market
+            # NegRisk group would otherwise emit both BUNDLE_LONG and MULTILEG_LONG for
+            # the same legs, doubling the exposure.
+            if group_id and len(self._group_states[group_id]) > 1 and bundle_signal is None:
                 multileg_signal = self._check_multileg_arbitrage(
                     group_id, self._group_states[group_id], bankroll
                 )
