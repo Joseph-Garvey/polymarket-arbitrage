@@ -25,7 +25,7 @@ from polymarket_client.models import (
     Trade,
 )
 from core.risk_manager import RiskManager
-from core.portfolio import Portfolio
+from core.portfolio import GroupArbLeg, Portfolio
 
 
 logger = logging.getLogger(__name__)
@@ -579,7 +579,7 @@ class ExecutionEngine:
         # This enables correct PnL and prevents the kill switch from false-firing.
         # Also handle multileg_arb fills to register the re-entry guard.
         if trade.strategy_tag in ("bundle_arb", "multileg_arb") and trade.side == OrderSide.BUY:
-            self._maybe_open_arb_pair(trade.market_id, trade.strategy_tag)
+            self._maybe_open_group_position(trade.market_id, trade.strategy_tag)
 
         # Update risk manager
         self.risk_manager.update_from_fill(trade)
@@ -589,18 +589,17 @@ class ExecutionEngine:
             f"{trade.side.value} {trade.size:.2f} {trade.token_type.value} @ {trade.price:.4f}"
         )
 
-    def _maybe_open_arb_pair(self, market_id: str, strategy_tag: str = "bundle_arb") -> None:
+    def _maybe_open_group_position(self, market_id: str, strategy_tag: str = "bundle_arb") -> None:
         """Open an arb pair on the portfolio once the relevant legs are filled.
 
         For bundle_arb: requires both YES and NO positions to exist before opening
-        the pair (YES + NO sum < 1 guarantees locked profit).
+        the group (YES + NO sum < 1 guarantees locked profit).
 
         For multileg_arb: each market holds only a YES position (one leg of a
-        multi-market bet). The re-entry guard uses _open_arb_pairs membership, so
-        we add the market_id as soon as the YES position exists. We use 0.0 for
-        the no_entry price because there is no NO leg in a multileg trade.
+        multi-market bet). The re-entry guard uses _open_group_arbs membership, so
+        we add the market_id as soon as the YES position exists.
         """
-        if market_id in self.portfolio._open_arb_pairs:
+        if market_id in self.portfolio._open_group_arbs:
             return  # Already tracking this market
 
         yes_pos = self.portfolio.get_position(market_id, TokenType.YES)
@@ -608,21 +607,42 @@ class ExecutionEngine:
         if strategy_tag == "multileg_arb":
             # Multileg: only a YES position per market; register as soon as it exists
             if yes_pos and yes_pos.size > 0:
-                self.portfolio.open_arb_pair(
-                    market_id=market_id,
-                    yes_entry=yes_pos.avg_entry_price,
-                    no_entry=0.0,
+                legs = [
+                    GroupArbLeg(
+                        market_id=market_id,
+                        token_type=TokenType.YES,
+                        entry_price=yes_pos.avg_entry_price,
+                        size=yes_pos.size,
+                    )
+                ]
+                self.portfolio.open_group_position(
+                    group_id=market_id,
+                    legs=legs,
                     size=yes_pos.size,
                 )
         else:
-            # bundle_arb: require both YES and NO legs before opening pair
+            # bundle_arb: require both YES and NO legs before opening group
             no_pos = self.portfolio.get_position(market_id, TokenType.NO)
             if yes_pos and no_pos and yes_pos.size > 0 and no_pos.size > 0:
-                self.portfolio.open_arb_pair(
-                    market_id=market_id,
-                    yes_entry=yes_pos.avg_entry_price,
-                    no_entry=no_pos.avg_entry_price,
-                    size=min(yes_pos.size, no_pos.size),
+                size = min(yes_pos.size, no_pos.size)
+                legs = [
+                    GroupArbLeg(
+                        market_id=market_id,
+                        token_type=TokenType.YES,
+                        entry_price=yes_pos.avg_entry_price,
+                        size=size,
+                    ),
+                    GroupArbLeg(
+                        market_id=market_id,
+                        token_type=TokenType.NO,
+                        entry_price=no_pos.avg_entry_price,
+                        size=size,
+                    ),
+                ]
+                self.portfolio.open_group_position(
+                    group_id=market_id,
+                    legs=legs,
+                    size=size,
                 )
 
     def get_open_orders(self, market_id: Optional[str] = None) -> list[Order]:

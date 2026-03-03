@@ -16,7 +16,7 @@ from polymarket_client.models import (
     OpportunityType,
 )
 from core.arb_engine import ArbEngine, ArbConfig
-from core.portfolio import Portfolio
+from core.portfolio import GroupArbLeg, Portfolio
 
 
 @pytest.fixture
@@ -441,12 +441,16 @@ class TestPortfolioAwareCooldown:
         assert len(bundle) == 1
 
     def test_suppresses_reentry_when_open_position(self, arb_config: ArbConfig):
-        """Engine emits no bundle signal when an arb pair is already open."""
+        """Engine emits no bundle signal when a group arb is already open."""
         portfolio = Portfolio(initial_balance=10000.0)
         engine = ArbEngine(arb_config, portfolio=portfolio)
 
-        # Simulate both legs filling — open the arb pair
-        portfolio.open_arb_pair("test_market", yes_entry=0.45, no_entry=0.50, size=50.0)
+        # Simulate both legs filling — open the group arb
+        legs = [
+            GroupArbLeg(market_id="test_market", token_type=None, entry_price=0.45, size=50.0),
+            GroupArbLeg(market_id="test_market", token_type=None, entry_price=0.50, size=50.0),
+        ]
+        portfolio.open_group_position("test_market", legs=legs, size=50.0)
 
         state = create_market_state(self._profitable_book())
         signals = engine.analyze(state)
@@ -455,12 +459,16 @@ class TestPortfolioAwareCooldown:
         assert len(bundle) == 0
 
     def test_signals_again_after_pair_closed(self, arb_config: ArbConfig):
-        """Engine signals again once the arb pair is resolved and closed."""
+        """Engine signals again once the group arb is resolved and closed."""
         portfolio = Portfolio(initial_balance=10000.0)
         engine = ArbEngine(arb_config, portfolio=portfolio)
 
-        portfolio.open_arb_pair("test_market", yes_entry=0.45, no_entry=0.50, size=50.0)
-        portfolio.close_arb_pair("test_market")
+        legs = [
+            GroupArbLeg(market_id="test_market", token_type=None, entry_price=0.45, size=50.0),
+            GroupArbLeg(market_id="test_market", token_type=None, entry_price=0.50, size=50.0),
+        ]
+        portfolio.open_group_position("test_market", legs=legs, size=50.0)
+        portfolio.close_group_position("test_market")
 
         state = create_market_state(self._profitable_book())
         signals = engine.analyze(state)

@@ -17,26 +17,34 @@ logger = logging.getLogger(__name__)
 
 
 @dataclass
-class ArbPairPosition:
-    """
-    Tracks a bundle arbitrage pair (YES + NO legs) as a single unit.
+class GroupArbLeg:
+    """Single leg of a grouped arbitrage position."""
 
-    Because both legs will show unrealised losses until resolution, tracking
-    them individually makes PnL look negative even when the profit is locked.
-    This dataclass represents the guaranteed outcome correctly.
-    """
     market_id: str
-    yes_entry: float    # Price paid for YES leg
-    no_entry: float     # Price paid for NO leg
+    token_type: TokenType
+    entry_price: float
     size: float
-    total_cost: float   # yes_entry + no_entry (< 1.0 for a profitable bundle long)
+
+
+@dataclass
+class GroupArbPosition:
+    """
+    Tracks a multi-leg arbitrage group as a single unit.
+
+    Supports both 2-leg (YES+NO) and N-leg (Categorical) arbs.
+    """
+
+    group_id: str
+    legs: list[GroupArbLeg]
+    size: float
+    total_cost: float  # Sum of entry_prices (< 1.0 for a profitable long)
     locked_profit: float  # 1.0 - total_cost (guaranteed at resolution)
     opened_at: datetime
     status: str = "open"  # open, resolving, closed
 
     @property
     def unrealized_pnl(self) -> float:
-        """Profit is locked at entry for bundle arb — return it unconditionally."""
+        """Profit is locked at entry — return it unconditionally."""
         return self.locked_profit * self.size
 
 
@@ -114,9 +122,9 @@ class Portfolio:
         # Positions: market_id -> token_type -> PortfolioPosition
         self._positions: dict[str, dict[TokenType, PortfolioPosition]] = {}
 
-        # Arb pair tracking (open and closed)
-        self._open_arb_pairs: dict[str, ArbPairPosition] = {}
-        self._closed_arb_pairs: list[ArbPairPosition] = []
+        # Group arb tracking (open and closed)
+        self._open_group_arbs: dict[str, GroupArbPosition] = {}
+        self._closed_group_arbs: list[GroupArbPosition] = []
 
         # Trade history
         self._trades: list[Trade] = []
@@ -279,22 +287,25 @@ class Portfolio:
         """
         total = 0.0
 
-        # Markets that belong to an open arb pair — skip their individual legs
-        arb_market_ids = set(self._open_arb_pairs.keys())
+        # Markets that belong to an open group arb — skip their individual legs
+        arb_market_ids = set()
+        for group in self._open_group_arbs.values():
+            for leg in group.legs:
+                arb_market_ids.add((leg.market_id, leg.token_type))
 
         for market_id, tokens in self._positions.items():
-            if market_id in arb_market_ids:
-                continue  # Handled below via locked_profit
             if market_id not in self._current_prices:
                 continue
             for token_type, position in tokens.items():
+                if (market_id, token_type) in arb_market_ids:
+                    continue  # Handled below via locked_profit
                 if token_type in self._current_prices[market_id]:
                     current_price = self._current_prices[market_id][token_type]
                     total += position.unrealized_pnl(current_price)
 
-        # Add locked profit from open arb pairs
-        for pair in self._open_arb_pairs.values():
-            total += pair.unrealized_pnl
+        # Add locked profit from open group arbs
+        for group in self._open_group_arbs.values():
+            total += group.unrealized_pnl
 
         self.stats.total_unrealized_pnl = total
     
@@ -353,44 +364,49 @@ class Portfolio:
     
     @property
     def arb_win_rate(self) -> float:
-        """Percentage of completed arb pairs that resolved profitably."""
-        if not self._closed_arb_pairs:
+        """Percentage of completed group arbs that resolved profitably."""
+        if not self._closed_group_arbs:
             return 0.0
-        winners = sum(1 for p in self._closed_arb_pairs if p.locked_profit > 0)
-        return winners / len(self._closed_arb_pairs)
+        winners = sum(1 for p in self._closed_group_arbs if p.locked_profit > 0)
+        return winners / len(self._closed_group_arbs)
 
-    def open_arb_pair(self, market_id: str, yes_entry: float, no_entry: float, size: float) -> ArbPairPosition:
-        """Record a new bundle arb pair opened at the given entry prices."""
-        total_cost = yes_entry + no_entry
+    def open_group_position(
+        self, group_id: str, legs: list[GroupArbLeg], size: float
+    ) -> GroupArbPosition:
+        """Record a new group arb (bundle or categorical) opened."""
+        total_cost = sum(leg.entry_price for leg in legs)
         locked_profit = 1.0 - total_cost
         if locked_profit <= 0:
             logger.warning(
-                f"Arb pair opened with locked_profit={locked_profit:.4f} (not profitable): "
-                f"{market_id} | yes={yes_entry} no={no_entry} total_cost={total_cost:.4f}"
+                f"Group arb opened with locked_profit={locked_profit:.4f} (not profitable): "
+                f"{group_id} | total_cost={total_cost:.4f}"
             )
-        pair = ArbPairPosition(
-            market_id=market_id,
-            yes_entry=yes_entry,
-            no_entry=no_entry,
+
+        group = GroupArbPosition(
+            group_id=group_id,
+            legs=legs,
             size=size,
             total_cost=total_cost,
             locked_profit=locked_profit,
             opened_at=datetime.utcnow(),
         )
-        self._open_arb_pairs[market_id] = pair
+        self._open_group_arbs[group_id] = group
         logger.info(
-            f"Arb pair opened: {market_id} | cost={total_cost:.4f} | locked_profit={locked_profit:.4f} | size={size}"
+            f"Group arb opened: {group_id} | cost={total_cost:.4f} | "
+            f"locked_profit={locked_profit:.4f} | size={size} | legs={len(legs)}"
         )
-        return pair
+        return group
 
-    def close_arb_pair(self, market_id: str) -> Optional[ArbPairPosition]:
-        """Mark an open arb pair as closed (e.g. on market resolution)."""
-        pair = self._open_arb_pairs.pop(market_id, None)
-        if pair:
-            pair.status = "closed"
-            self._closed_arb_pairs.append(pair)
-            logger.info(f"Arb pair closed: {market_id} | locked_profit={pair.locked_profit:.4f}")
-        return pair
+    def close_group_position(self, group_id: str) -> Optional[GroupArbPosition]:
+        """Mark an open group arb as closed (e.g. on market resolution)."""
+        group = self._open_group_arbs.pop(group_id, None)
+        if group:
+            group.status = "closed"
+            self._closed_group_arbs.append(group)
+            logger.info(
+                f"Group arb closed: {group_id} | locked_profit={group.locked_profit:.4f}"
+            )
+        return group
 
     def get_summary(self) -> dict:
         """Get portfolio summary."""
@@ -407,6 +423,25 @@ class Portfolio:
                 len(tokens) for tokens in self._positions.values()
             ),
             "markets_traded": len(self._positions),
+            "open_group_arbs": {
+                gid: {
+                    "group_id": group.group_id,
+                    "legs": [
+                        {
+                            "market_id": leg.market_id,
+                            "token_type": leg.token_type.value,
+                            "entry_price": leg.entry_price,
+                            "size": leg.size,
+                        }
+                        for leg in group.legs
+                    ],
+                    "size": group.size,
+                    "total_cost": group.total_cost,
+                    "locked_profit": group.locked_profit,
+                    "status": group.status,
+                }
+                for gid, group in self._open_group_arbs.items()
+            },
         }
     
     def get_all_positions(self) -> dict[str, dict[TokenType, PortfolioPosition]]:
@@ -447,8 +482,8 @@ class Portfolio:
         """Reset portfolio to initial state."""
         self._positions = {}
         self._trades = []
-        self._open_arb_pairs = {}
-        self._closed_arb_pairs = []
+        self._open_group_arbs = {}
+        self._closed_group_arbs = []
         self.cash_balance = self.initial_balance
         self.stats = PortfolioStats()
         self._current_prices = {}

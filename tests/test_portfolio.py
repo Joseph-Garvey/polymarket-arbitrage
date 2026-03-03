@@ -7,7 +7,7 @@ import pytest
 from datetime import datetime
 
 from polymarket_client.models import OrderSide, TokenType, Trade
-from core.portfolio import ArbPairPosition, Portfolio, PortfolioPosition
+from core.portfolio import GroupArbLeg, GroupArbPosition, Portfolio, PortfolioPosition
 
 
 @pytest.fixture
@@ -235,30 +235,41 @@ class TestWinRate:
         assert portfolio.stats.win_rate == 0.5
 
 
+def make_legs(market_id: str, yes_entry: float, no_entry: float, size: float) -> list[GroupArbLeg]:
+    """Helper to create YES+NO legs for a 2-leg group arb."""
+    return [
+        GroupArbLeg(market_id=market_id, token_type=TokenType.YES, entry_price=yes_entry, size=size),
+        GroupArbLeg(market_id=market_id, token_type=TokenType.NO, entry_price=no_entry, size=size),
+    ]
+
+
 class TestArbPairTracking:
-    """Tests for bundle arb pair lifecycle and PnL semantics."""
+    """Tests for group arb lifecycle and PnL semantics."""
 
-    def test_open_arb_pair_records_locked_profit(self, portfolio: Portfolio):
+    def test_open_group_position_records_locked_profit(self, portfolio: Portfolio):
         """Locked profit equals 1 - total_cost at entry."""
-        pair = portfolio.open_arb_pair("mkt", yes_entry=0.48, no_entry=0.47, size=100.0)
-        assert pair.total_cost == pytest.approx(0.95)
-        assert pair.locked_profit == pytest.approx(0.05)
+        legs = make_legs("mkt", yes_entry=0.48, no_entry=0.47, size=100.0)
+        group = portfolio.open_group_position("mkt", legs=legs, size=100.0)
+        assert group.total_cost == pytest.approx(0.95)
+        assert group.locked_profit == pytest.approx(0.05)
 
-    def test_open_arb_pair_stored_in_open_dict(self, portfolio: Portfolio):
-        """open_arb_pair adds pair to _open_arb_pairs keyed by market_id."""
-        portfolio.open_arb_pair("mkt", yes_entry=0.48, no_entry=0.47, size=100.0)
-        assert "mkt" in portfolio._open_arb_pairs
+    def test_open_group_position_stored_in_open_dict(self, portfolio: Portfolio):
+        """open_group_position adds group to _open_group_arbs keyed by group_id."""
+        legs = make_legs("mkt", yes_entry=0.48, no_entry=0.47, size=100.0)
+        portfolio.open_group_position("mkt", legs=legs, size=100.0)
+        assert "mkt" in portfolio._open_group_arbs
 
-    def test_close_arb_pair_moves_to_closed_list(self, portfolio: Portfolio):
-        """close_arb_pair removes from open dict and appends to closed list."""
-        portfolio.open_arb_pair("mkt", yes_entry=0.48, no_entry=0.47, size=100.0)
-        portfolio.close_arb_pair("mkt")
-        assert "mkt" not in portfolio._open_arb_pairs
-        assert len(portfolio._closed_arb_pairs) == 1
-        assert portfolio._closed_arb_pairs[0].status == "closed"
+    def test_close_group_position_moves_to_closed_list(self, portfolio: Portfolio):
+        """close_group_position removes from open dict and appends to closed list."""
+        legs = make_legs("mkt", yes_entry=0.48, no_entry=0.47, size=100.0)
+        portfolio.open_group_position("mkt", legs=legs, size=100.0)
+        portfolio.close_group_position("mkt")
+        assert "mkt" not in portfolio._open_group_arbs
+        assert len(portfolio._closed_group_arbs) == 1
+        assert portfolio._closed_group_arbs[0].status == "closed"
 
     def test_unrealized_pnl_uses_locked_profit_not_mark_to_market(self, portfolio: Portfolio):
-        """For an arb pair, unrealized PnL == locked_profit * size regardless of prices."""
+        """For a group arb, unrealized PnL == locked_profit * size regardless of prices."""
         portfolio.update_from_fill(create_trade(
             token_type=TokenType.YES, side=OrderSide.BUY, price=0.48, size=100.0
         ))
@@ -266,7 +277,8 @@ class TestArbPairTracking:
             trade_id="t2", order_id="o2",
             token_type=TokenType.NO, side=OrderSide.BUY, price=0.47, size=100.0
         ))
-        portfolio.open_arb_pair("test_market", yes_entry=0.48, no_entry=0.47, size=100.0)
+        legs = make_legs("test_market", yes_entry=0.48, no_entry=0.47, size=100.0)
+        portfolio.open_group_position("test_market", legs=legs, size=100.0)
 
         # Mid-market prices that would make individual legs show losses
         portfolio.update_prices("test_market", yes_price=0.48, no_price=0.47)
@@ -274,32 +286,36 @@ class TestArbPairTracking:
         # Unrealised PnL should be locked_profit * size = 0.05 * 100 = 5.0
         assert portfolio.stats.total_unrealized_pnl == pytest.approx(5.0)
 
-    def test_open_arb_pair_warns_when_not_profitable(self, portfolio: Portfolio, caplog):
-        """open_arb_pair logs a warning when total_cost >= 1.0 (no locked profit)."""
+    def test_open_group_position_warns_when_not_profitable(self, portfolio: Portfolio, caplog):
+        """open_group_position logs a warning when total_cost >= 1.0 (no locked profit)."""
         with caplog.at_level(logging.WARNING, logger="core.portfolio"):
-            portfolio.open_arb_pair("mkt", yes_entry=0.52, no_entry=0.52, size=100.0)
+            legs = make_legs("mkt", yes_entry=0.52, no_entry=0.52, size=100.0)
+            portfolio.open_group_position("mkt", legs=legs, size=100.0)
         assert any("locked_profit" in rec.message.lower() or "not profitable" in rec.message.lower()
                    for rec in caplog.records)
 
     def test_arb_win_rate_zero_when_no_closed_pairs(self, portfolio: Portfolio):
-        """arb_win_rate returns 0.0 before any pairs are closed."""
+        """arb_win_rate returns 0.0 before any groups are closed."""
         assert portfolio.arb_win_rate == 0.0
 
     def test_arb_win_rate_counts_profitable_resolved_pairs(self, portfolio: Portfolio):
-        """arb_win_rate = fraction of closed pairs with positive locked_profit."""
-        portfolio.open_arb_pair("mkt_win", yes_entry=0.48, no_entry=0.47, size=100.0)  # profit 0.05
-        portfolio.open_arb_pair("mkt_lose", yes_entry=0.52, no_entry=0.52, size=100.0)  # profit -0.04
-        portfolio.close_arb_pair("mkt_win")
-        portfolio.close_arb_pair("mkt_lose")
+        """arb_win_rate = fraction of closed groups with positive locked_profit."""
+        legs_win = make_legs("mkt_win", yes_entry=0.48, no_entry=0.47, size=100.0)  # profit 0.05
+        legs_lose = make_legs("mkt_lose", yes_entry=0.52, no_entry=0.52, size=100.0)  # profit -0.04
+        portfolio.open_group_position("mkt_win", legs=legs_win, size=100.0)
+        portfolio.open_group_position("mkt_lose", legs=legs_lose, size=100.0)
+        portfolio.close_group_position("mkt_win")
+        portfolio.close_group_position("mkt_lose")
         assert portfolio.arb_win_rate == pytest.approx(0.5)
 
     def test_reset_clears_arb_pairs(self, portfolio: Portfolio):
-        """reset() clears both open and closed arb pair lists."""
-        portfolio.open_arb_pair("mkt", yes_entry=0.48, no_entry=0.47, size=100.0)
-        portfolio.close_arb_pair("mkt")
+        """reset() clears both open and closed group arb lists."""
+        legs = make_legs("mkt", yes_entry=0.48, no_entry=0.47, size=100.0)
+        portfolio.open_group_position("mkt", legs=legs, size=100.0)
+        portfolio.close_group_position("mkt")
         portfolio.reset()
-        assert len(portfolio._open_arb_pairs) == 0
-        assert len(portfolio._closed_arb_pairs) == 0
+        assert len(portfolio._open_group_arbs) == 0
+        assert len(portfolio._closed_group_arbs) == 0
 
 
 class TestPortfolioSummary:

@@ -420,7 +420,7 @@ class TradingBotWithDashboard:
         
         # Cross-platform summary
         if self.cross_platform_engine:
-            cp_stats = self.cross_platform_engine.get_stats()
+            cp_stats = self.cross_platform_engine.get_llm_stats()
             logger.info(f"Cross-Platform Opportunities: {cp_stats['total_opportunities']}")
             logger.info(f"Matched Market Pairs: {cp_stats['matched_pairs']}")
         

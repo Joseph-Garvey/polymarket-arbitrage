@@ -556,7 +556,11 @@ class ArbEngine:
         if self._portfolio is not None:
             has_open_position = (
                 self._portfolio.get_exposure(market_id)["total_notional"] > 0
-                or market_id in self._portfolio._open_arb_pairs
+                or any(
+                    leg.market_id == market_id
+                    for g in self._portfolio._open_group_arbs.values()
+                    for leg in g.legs
+                )
             )
             if has_open_position:
                 return None
@@ -690,7 +694,11 @@ class ArbEngine:
                 for m_id in group_states:
                     has_open_position = (
                         self._portfolio.get_exposure(m_id)["total_notional"] > 0
-                        or m_id in self._portfolio._open_arb_pairs
+                        or any(
+                            leg.market_id == m_id
+                            for g in self._portfolio._open_group_arbs.values()
+                            for leg in g.legs
+                        )
                     )
                     if has_open_position:
                         return None
