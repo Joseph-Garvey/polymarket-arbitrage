@@ -160,7 +160,11 @@ class ArbEngine:
 
             # Evict resolved/closed markets from group tracking to prevent memory leak
             if market_state.market.resolved or market_state.market.closed:
-                self._group_states.pop(group_id, None)
+                if market_id in self._group_states[group_id]:
+                    del self._group_states[group_id][market_id]
+                # If group is now empty, we can clean it up entirely
+                if not self._group_states[group_id]:
+                    self._group_states.pop(group_id, None)
             # Cap total group count at 500 — only on new insertions to avoid evicting
             # active groups when we're merely updating state for an existing group.
             elif is_new_group and len(self._group_states) >= 500:
@@ -185,7 +189,12 @@ class ArbEngine:
             # this guard every WebSocket tick fires _check_multileg_arbitrage().
             # Skip if group_size is set and we haven't seen all expected legs yet —
             # a partial group view cannot confirm the arb is risk-free.
-            if group_id and group_id in self._group_states and len(self._group_states[group_id]) > 1 and bundle_signal is None:
+            if (
+                group_id
+                and group_id in self._group_states
+                and len(self._group_states[group_id]) > 1
+                and bundle_signal is None
+            ):
                 group_states_now = self._group_states[group_id]
                 expected_legs = market_state.market.group_size
                 if expected_legs > 0 and len(group_states_now) < expected_legs:
@@ -216,9 +225,7 @@ class ArbEngine:
         # Determine which group_ids this market_id belongs to, so multileg
         # opportunities whose timing.market_id is the group_id are also evaluated.
         groups_for_market: set[str] = {
-            gid
-            for gid, members in self._group_states.items()
-            if market_id in members
+            gid for gid, members in self._group_states.items() if market_id in members
         }
 
         for key, timing in self._active_opportunities.items():
@@ -548,13 +555,12 @@ class ArbEngine:
         # Only suppress re-entry if we already have an open position in this market
         # (the old 2-second blanket cooldown was blocking valid repeating opportunities).
         if self._portfolio is not None:
-            has_open_position = (
-                self._portfolio.get_exposure(market_id)["total_notional"] > 0
-                or any(
-                    leg.market_id == market_id
-                    for g in self._portfolio._open_group_arbs.values()
-                    for leg in g.legs
-                )
+            has_open_position = self._portfolio.get_exposure(market_id)[
+                "total_notional"
+            ] > 0 or any(
+                leg.market_id == market_id
+                for g in self._portfolio._open_group_arbs.values()
+                for leg in g.legs
             )
             if has_open_position:
                 return None
@@ -686,13 +692,12 @@ class ArbEngine:
             # Avoid re-entry if we already have exposure
             if self._portfolio is not None:
                 for m_id in group_states:
-                    has_open_position = (
-                        self._portfolio.get_exposure(m_id)["total_notional"] > 0
-                        or any(
-                            leg.market_id == m_id
-                            for g in self._portfolio._open_group_arbs.values()
-                            for leg in g.legs
-                        )
+                    has_open_position = self._portfolio.get_exposure(m_id)[
+                        "total_notional"
+                    ] > 0 or any(
+                        leg.market_id == m_id
+                        for g in self._portfolio._open_group_arbs.values()
+                        for leg in g.legs
                     )
                     if has_open_position:
                         return None

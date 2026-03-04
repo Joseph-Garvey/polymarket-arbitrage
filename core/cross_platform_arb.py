@@ -351,7 +351,10 @@ class MarketMatcher:
                 rf"{name}\.?\s+(\d{{1,2}})(?:,?\s+(\d{{4}}))?", text_lower
             )
             if match:
-                return f"{match.group(2) or '2025'}-{num}-{match.group(1).zfill(2)}"
+                current_year = datetime.now().year
+                return (
+                    f"{match.group(2) or current_year}-{num}-{match.group(1).zfill(2)}"
+                )
         return None
 
     def dates_match(self, d1: Optional[str], d2: Optional[str]) -> bool:
@@ -431,7 +434,11 @@ class MarketMatcher:
 
     @staticmethod
     def _is_multi_outcome_title(title: str) -> bool:
-        return bool(re.search(r"yes\s+\w[^,]*,\s*yes\s+\w", title, re.IGNORECASE))
+        # Kalshi multi-outcome titles embed multiple outcomes separated by commas,
+        # each prefixed with "yes" or "no". Match any combination of yes/no pairs.
+        return bool(
+            re.search(r"(?:yes|no)\s+\w[^,]*,\s*(?:yes|no)\s+\w", title, re.IGNORECASE)
+        )
 
     def _precompute_market_data(self, text: str) -> dict:
         text_lower = text.lower()
@@ -518,13 +525,14 @@ class MarketMatcher:
                 cat = self._categorize_market(m.title)
             kalshi_by_cat.setdefault(cat, []).append(m)
 
+        all_cats = ["sports", "politics", "crypto", "other"]
         total_comparisons = sum(
             len(poly_by_cat.get(cat, [])) * len(kalshi_by_cat.get(cat, []))
-            for cat in ["sports", "politics", "crypto"]
+            for cat in all_cats
         )
         comparisons_done = 0
 
-        for cat in ["sports", "politics", "crypto"]:
+        for cat in all_cats:
             p_list = poly_by_cat.get(cat, [])
             k_list = kalshi_by_cat.get(cat, [])
             if not p_list or not k_list:
@@ -616,12 +624,16 @@ class CrossPlatformArbEngine:
         use_llm: bool = True,
         openrouter_api_key: str = "",
         openrouter_model: str = "",
+        min_match_similarity: float = 0.70,
     ):
         self.min_edge = min_edge
         self.polymarket_taker_fee = polymarket_taker_fee
         self.kalshi_taker_fee = kalshi_taker_fee
         self.gas_cost = gas_cost
+
+        # Initialize matcher
         self.matcher = MarketMatcher(
+            min_similarity=min_match_similarity,
             use_llm=use_llm,
             openrouter_api_key=openrouter_api_key,
             openrouter_model=openrouter_model,
@@ -649,27 +661,91 @@ class CrossPlatformArbEngine:
         }
         p_y_a = prices["p_y_a"]
         k_y_b = prices["k_y_b"]
-        if p_y_a is None or k_y_b is None:
-            return None
-
-        # YES Arb: Buy Poly, Sell Kalshi
-        gross = k_y_b - p_y_a
-        fees = (
-            (p_y_a * self.polymarket_taker_fee)
-            + (k_y_b * self.kalshi_taker_fee)
-            + (self.gas_cost * 2)
-        )
-        if gross - fees >= self.min_edge:
-            return self._create_opp(
-                pair,
-                "polymarket",
-                "kalshi",
-                "YES",
-                p_y_a,
-                k_y_b,
-                gross,
-                gross - fees,
+        if p_y_a is not None and k_y_b is not None:
+            # YES Arb: Buy Poly, Sell Kalshi
+            gross = k_y_b - p_y_a
+            fees = (
+                (p_y_a * self.polymarket_taker_fee)
+                + (k_y_b * self.kalshi_taker_fee)
+                + self.gas_cost
             )
+            if gross - fees >= self.min_edge:
+                return self._create_opp(
+                    pair,
+                    "polymarket",
+                    "kalshi",
+                    "YES",
+                    p_y_a,
+                    k_y_b,
+                    gross,
+                    gross - fees,
+                )
+
+        p_y_b = prices["p_y_b"]
+        k_y_a = prices["k_y_a"]
+        if k_y_a is not None and p_y_b is not None:
+            # YES Arb: Buy Kalshi, Sell Poly
+            gross = p_y_b - k_y_a
+            fees = (
+                (k_y_a * self.kalshi_taker_fee)
+                + (p_y_b * self.polymarket_taker_fee)
+                + self.gas_cost
+            )
+            if gross - fees >= self.min_edge:
+                return self._create_opp(
+                    pair,
+                    "kalshi",
+                    "polymarket",
+                    "YES",
+                    k_y_a,
+                    p_y_b,
+                    gross,
+                    gross - fees,
+                )
+
+        p_n_a = prices["p_n_a"]
+        k_n_b = prices["k_n_b"]
+        if p_n_a is not None and k_n_b is not None:
+            # NO Arb: Buy Poly, Sell Kalshi
+            gross = k_n_b - p_n_a
+            fees = (
+                (p_n_a * self.polymarket_taker_fee)
+                + (k_n_b * self.kalshi_taker_fee)
+                + self.gas_cost
+            )
+            if gross - fees >= self.min_edge:
+                return self._create_opp(
+                    pair,
+                    "polymarket",
+                    "kalshi",
+                    "NO",
+                    p_n_a,
+                    k_n_b,
+                    gross,
+                    gross - fees,
+                )
+
+        p_n_b = prices["p_n_b"]
+        k_n_a = prices["k_n_a"]
+        if k_n_a is not None and p_n_b is not None:
+            # NO Arb: Buy Kalshi, Sell Poly
+            gross = p_n_b - k_n_a
+            fees = (
+                (k_n_a * self.kalshi_taker_fee)
+                + (p_n_b * self.polymarket_taker_fee)
+                + self.gas_cost
+            )
+            if gross - fees >= self.min_edge:
+                return self._create_opp(
+                    pair,
+                    "kalshi",
+                    "polymarket",
+                    "NO",
+                    k_n_a,
+                    p_n_b,
+                    gross,
+                    gross - fees,
+                )
 
         return None
 

@@ -1,6 +1,7 @@
 """
 Multi-leg arbitrage regression and unit tests.
 """
+
 import asyncio
 from unittest.mock import AsyncMock, MagicMock
 
@@ -23,13 +24,22 @@ def _run(coro):
         # call asyncio.get_event_loop() still find a valid loop.
         pass
 
+
 from core.arb_engine import ArbEngine, ArbConfig
 from core.execution import ExecutionEngine, ExecutionConfig
 from core.portfolio import Portfolio, GroupArbLeg
 from core.risk_manager import RiskManager, RiskConfig
 from polymarket_client.models import (
-    Market, MarketState, OrderBook, OrderBookSide, PriceLevel, TokenOrderBook,
-    TokenType, OpportunityType, Trade, OrderSide,
+    Market,
+    MarketState,
+    OrderBook,
+    OrderBookSide,
+    PriceLevel,
+    TokenOrderBook,
+    TokenType,
+    OpportunityType,
+    Trade,
+    OrderSide,
 )
 
 
@@ -50,7 +60,12 @@ def arb_config() -> ArbConfig:
 
 
 def _create_order_book_ml(
-    market_id: str, yes_bid: float, yes_ask: float, no_bid: float, no_ask: float, size: float = 100.0
+    market_id: str,
+    yes_bid: float,
+    yes_ask: float,
+    no_bid: float,
+    no_ask: float,
+    size: float = 100.0,
 ) -> OrderBook:
     return OrderBook(
         market_id=market_id,
@@ -71,10 +86,18 @@ class TestMultilegDoubleSignalBug:
     """Regression tests for the double-signal bug in 2-market NegRisk groups."""
 
     def _bundle_profitable(self, market_id: str, group_id: str) -> MarketState:
-        ob = _create_order_book_ml(market_id, yes_bid=0.43, yes_ask=0.45, no_bid=0.48, no_ask=0.50)
+        ob = _create_order_book_ml(
+            market_id, yes_bid=0.43, yes_ask=0.45, no_bid=0.48, no_ask=0.50
+        )
         return MarketState(
-            market=Market(market_id=market_id, condition_id=market_id, question="Test",
-                          active=True, volume_24h=50000.0, group_id=group_id),
+            market=Market(
+                market_id=market_id,
+                condition_id=market_id,
+                question="Test",
+                active=True,
+                volume_24h=50000.0,
+                group_id=group_id,
+            ),
             order_book=ob,
         )
 
@@ -86,10 +109,19 @@ class TestMultilegDoubleSignalBug:
         state_b = self._bundle_profitable("market_b", group_id)
         engine.analyze(state_b, bankroll=1000.0)
         signals = engine.analyze(state_a, bankroll=1000.0)
-        bundle_signals = [s for s in signals if s.opportunity and s.opportunity.opportunity_type
-                          in (OpportunityType.BUNDLE_LONG, OpportunityType.BUNDLE_SHORT)]
-        multileg_signals = [s for s in signals if s.opportunity and
-                            s.opportunity.opportunity_type == OpportunityType.MULTILEG_LONG]
+        bundle_signals = [
+            s
+            for s in signals
+            if s.opportunity
+            and s.opportunity.opportunity_type
+            in (OpportunityType.BUNDLE_LONG, OpportunityType.BUNDLE_SHORT)
+        ]
+        multileg_signals = [
+            s
+            for s in signals
+            if s.opportunity
+            and s.opportunity.opportunity_type == OpportunityType.MULTILEG_LONG
+        ]
         assert len(bundle_signals) == 1
         assert len(multileg_signals) == 0
 
@@ -99,31 +131,51 @@ class TestMultilegDoubleSignalBug:
         group_id = "neg_risk_group_2"
 
         def _ml_only(mid: str) -> MarketState:
-            ob = _create_order_book_ml(mid, yes_bid=0.37, yes_ask=0.40,
-                                       no_bid=0.58, no_ask=0.62, size=200.0)
+            ob = _create_order_book_ml(
+                mid, yes_bid=0.37, yes_ask=0.40, no_bid=0.58, no_ask=0.62, size=200.0
+            )
             return MarketState(
-                market=Market(market_id=mid, condition_id=mid, question="Test",
-                              active=True, volume_24h=50000.0, group_id=group_id),
+                market=Market(
+                    market_id=mid,
+                    condition_id=mid,
+                    question="Test",
+                    active=True,
+                    volume_24h=50000.0,
+                    group_id=group_id,
+                ),
                 order_book=ob,
             )
 
         engine.analyze(_ml_only("market_c"), bankroll=1000.0)
         signals = engine.analyze(_ml_only("market_d"), bankroll=1000.0)
-        ml = [s for s in signals if s.opportunity and
-              s.opportunity.opportunity_type == OpportunityType.MULTILEG_LONG]
+        ml = [
+            s
+            for s in signals
+            if s.opportunity
+            and s.opportunity.opportunity_type == OpportunityType.MULTILEG_LONG
+        ]
         assert len(ml) == 1
 
 
 class TestMultilegResolvedMarketEviction:
     """Regression: KeyError when a market resolves mid-analysis."""
 
-    def _make_state(self, market_id: str, group_id: str, *, resolved: bool = False) -> MarketState:
-        ob = _create_order_book_ml(market_id, yes_bid=0.37, yes_ask=0.40,
-                                   no_bid=0.58, no_ask=0.62, size=200.0)
+    def _make_state(
+        self, market_id: str, group_id: str, *, resolved: bool = False
+    ) -> MarketState:
+        ob = _create_order_book_ml(
+            market_id, yes_bid=0.37, yes_ask=0.40, no_bid=0.58, no_ask=0.62, size=200.0
+        )
         return MarketState(
-            market=Market(market_id=market_id, condition_id=market_id, question="Test",
-                          active=not resolved, volume_24h=50000.0,
-                          group_id=group_id, resolved=resolved),
+            market=Market(
+                market_id=market_id,
+                condition_id=market_id,
+                question="Test",
+                active=not resolved,
+                volume_24h=50000.0,
+                group_id=group_id,
+                resolved=resolved,
+            ),
             order_book=ob,
         )
 
@@ -139,20 +191,32 @@ class TestMultilegResolvedMarketEviction:
             )
         except KeyError as exc:
             pytest.fail(f"KeyError raised when market resolved: {exc}")
-        assert group_id not in engine._group_states
-        assert not any(s.opportunity and s.opportunity.opportunity_type == OpportunityType.MULTILEG_LONG
-                       for s in signals)
+        # group shouldn't be empty because evict_b is still there
+        assert group_id in engine._group_states
+        assert "evict_a" not in engine._group_states[group_id]
+        assert not any(
+            s.opportunity
+            and s.opportunity.opportunity_type == OpportunityType.MULTILEG_LONG
+            for s in signals
+        )
 
 
 class TestMultilegReEntryGuard:
     """Tests for the _active_opportunities re-entry guard."""
 
     def _ml_state(self, market_id: str, group_id: str) -> MarketState:
-        ob = _create_order_book_ml(market_id, yes_bid=0.37, yes_ask=0.40,
-                                   no_bid=0.58, no_ask=0.62, size=200.0)
+        ob = _create_order_book_ml(
+            market_id, yes_bid=0.37, yes_ask=0.40, no_bid=0.58, no_ask=0.62, size=200.0
+        )
         return MarketState(
-            market=Market(market_id=market_id, condition_id=market_id, question="Test",
-                          active=True, volume_24h=50000.0, group_id=group_id),
+            market=Market(
+                market_id=market_id,
+                condition_id=market_id,
+                question="Test",
+                active=True,
+                volume_24h=50000.0,
+                group_id=group_id,
+            ),
             order_book=ob,
         )
 
@@ -163,12 +227,20 @@ class TestMultilegReEntryGuard:
         state_b = self._ml_state("guard_market_b", group_id)
         engine.analyze(state_a, bankroll=1000.0)
         signals1 = engine.analyze(state_b, bankroll=1000.0)
-        ml1 = [s for s in signals1 if s.opportunity and
-               s.opportunity.opportunity_type == OpportunityType.MULTILEG_LONG]
+        ml1 = [
+            s
+            for s in signals1
+            if s.opportunity
+            and s.opportunity.opportunity_type == OpportunityType.MULTILEG_LONG
+        ]
         assert len(ml1) == 1
         signals2 = engine.analyze(state_a, bankroll=1000.0)
-        ml2 = [s for s in signals2 if s.opportunity and
-               s.opportunity.opportunity_type == OpportunityType.MULTILEG_LONG]
+        ml2 = [
+            s
+            for s in signals2
+            if s.opportunity
+            and s.opportunity.opportunity_type == OpportunityType.MULTILEG_LONG
+        ]
         assert len(ml2) == 0
 
     def test_guard_suppresses_different_member_market(self, arb_config: ArbConfig):
@@ -179,8 +251,12 @@ class TestMultilegReEntryGuard:
         engine.analyze(state_c, bankroll=1000.0)
         engine.analyze(state_d, bankroll=1000.0)
         signals2 = engine.analyze(state_c, bankroll=1000.0)
-        ml2 = [s for s in signals2 if s.opportunity and
-               s.opportunity.opportunity_type == OpportunityType.MULTILEG_LONG]
+        ml2 = [
+            s
+            for s in signals2
+            if s.opportunity
+            and s.opportunity.opportunity_type == OpportunityType.MULTILEG_LONG
+        ]
         assert len(ml2) == 0
 
     def test_guard_releases_after_expiry(self, arb_config: ArbConfig):
@@ -193,8 +269,12 @@ class TestMultilegReEntryGuard:
         multileg_key = f"{group_id}_multileg_long"
         del engine._active_opportunities[multileg_key]
         signals2 = engine.analyze(state_e, bankroll=1000.0)
-        ml2 = [s for s in signals2 if s.opportunity and
-               s.opportunity.opportunity_type == OpportunityType.MULTILEG_LONG]
+        ml2 = [
+            s
+            for s in signals2
+            if s.opportunity
+            and s.opportunity.opportunity_type == OpportunityType.MULTILEG_LONG
+        ]
         assert len(ml2) == 1
 
     def test_expiry_check_evicts_when_prices_move(self, arb_config: ArbConfig):
@@ -208,11 +288,18 @@ class TestMultilegReEntryGuard:
         assert multileg_key in engine._active_opportunities
 
         def _no_edge(mid: str) -> MarketState:
-            ob = _create_order_book_ml(mid, yes_bid=0.50, yes_ask=0.52,
-                                       no_bid=0.46, no_ask=0.48, size=200.0)
+            ob = _create_order_book_ml(
+                mid, yes_bid=0.50, yes_ask=0.52, no_bid=0.46, no_ask=0.48, size=200.0
+            )
             return MarketState(
-                market=Market(market_id=mid, condition_id=mid, question="Test",
-                              active=True, volume_24h=50000.0, group_id=group_id),
+                market=Market(
+                    market_id=mid,
+                    condition_id=mid,
+                    question="Test",
+                    active=True,
+                    volume_24h=50000.0,
+                    group_id=group_id,
+                ),
                 order_book=ob,
             )
 
@@ -228,9 +315,14 @@ class TestMultilegReEntryGuard:
 # Helpers and tests for TestCheckMultilegArbitrage
 # ---------------------------------------------------------------------------
 
+
 def _make_orderbook_ml(
-    market_id: str, yes_ask: float, yes_ask_size: float = 100.0,
-    yes_bid: float = None, no_ask: float = None, no_bid: float = None,
+    market_id: str,
+    yes_ask: float,
+    yes_ask_size: float = 100.0,
+    yes_bid: float = None,
+    no_ask: float = None,
+    no_bid: float = None,
 ) -> OrderBook:
     _yes_bid = yes_bid if yes_bid is not None else yes_ask - 0.02
     _no_ask = no_ask if no_ask is not None else 1.0 - yes_ask + 0.02
@@ -251,21 +343,33 @@ def _make_orderbook_ml(
 
 
 def _make_market_state_ml(
-    market_id: str, group_id: str, group_size: int,
-    yes_ask: float, yes_ask_size: float = 100.0,
+    market_id: str,
+    group_id: str,
+    group_size: int,
+    yes_ask: float,
+    yes_ask_size: float = 100.0,
 ) -> MarketState:
     market = Market(
-        market_id=market_id, condition_id=market_id,
-        question=f"Question for {market_id}?", group_id=group_id, group_size=group_size,
+        market_id=market_id,
+        condition_id=market_id,
+        question=f"Question for {market_id}?",
+        group_id=group_id,
+        group_size=group_size,
     )
-    return MarketState(market=market, order_book=_make_orderbook_ml(market_id, yes_ask, yes_ask_size))
+    return MarketState(
+        market=market, order_book=_make_orderbook_ml(market_id, yes_ask, yes_ask_size)
+    )
 
 
 @pytest.fixture
 def fee_config() -> ArbConfig:
     return ArbConfig(
-        min_edge=0.01, bundle_arb_enabled=True, mm_enabled=False,
-        taker_fee_bps=150, gas_cost_per_order=0.02, min_order_size=5.0,
+        min_edge=0.01,
+        bundle_arb_enabled=True,
+        mm_enabled=False,
+        taker_fee_bps=150,
+        gas_cost_per_order=0.02,
+        min_order_size=5.0,
     )
 
 
@@ -289,7 +393,9 @@ class TestCheckMultilegArbitrage:
         group_id = "ml_3leg_group"
         yes_ask_per_leg = 0.88 / 3
         states = {
-            f"ml_3leg_{i}": _make_market_state_ml(f"ml_3leg_{i}", group_id, 3, yes_ask=yes_ask_per_leg)
+            f"ml_3leg_{i}": _make_market_state_ml(
+                f"ml_3leg_{i}", group_id, 3, yes_ask=yes_ask_per_leg
+            )
             for i in range(3)
         }
         signal = engine._check_multileg_arbitrage(group_id, states, bankroll=1000.0)
@@ -318,13 +424,18 @@ class TestCheckMultilegArbitrage:
         yes_ask_a, yes_ask_b = 0.40, 0.35
         total_ask = yes_ask_a + yes_ask_b
         states = {
-            "ml_fee_a": _make_market_state_ml("ml_fee_a", group_id, 2, yes_ask=yes_ask_a),
-            "ml_fee_b": _make_market_state_ml("ml_fee_b", group_id, 2, yes_ask=yes_ask_b),
+            "ml_fee_a": _make_market_state_ml(
+                "ml_fee_a", group_id, 2, yes_ask=yes_ask_a
+            ),
+            "ml_fee_b": _make_market_state_ml(
+                "ml_fee_b", group_id, 2, yes_ask=yes_ask_b
+            ),
         }
         signal = engine._check_multileg_arbitrage(group_id, states, bankroll=1000.0)
         assert signal is not None
         expected = (
-            1.0 - total_ask
+            1.0
+            - total_ask
             - (fee_config.taker_fee_bps / 10000) * total_ask
             - fee_config.gas_cost_per_order * 2
         )
@@ -333,23 +444,42 @@ class TestCheckMultilegArbitrage:
     def test_partial_group_suppression(self, arb_config: ArbConfig):
         engine = ArbEngine(arb_config)
         group_id = "ml_partial_group"
-        state_a = _make_market_state_ml("ml_partial_a", group_id, group_size=5, yes_ask=0.40)
-        state_b = _make_market_state_ml("ml_partial_b", group_id, group_size=5, yes_ask=0.40)
+        state_a = _make_market_state_ml(
+            "ml_partial_a", group_id, group_size=5, yes_ask=0.40
+        )
+        state_b = _make_market_state_ml(
+            "ml_partial_b", group_id, group_size=5, yes_ask=0.40
+        )
         engine.analyze(state_a, bankroll=1000.0)
         signals = engine.analyze(state_b, bankroll=1000.0)
-        assert not any(s.opportunity and s.opportunity.opportunity_type == OpportunityType.MULTILEG_LONG
-                       for s in signals)
+        assert not any(
+            s.opportunity
+            and s.opportunity.opportunity_type == OpportunityType.MULTILEG_LONG
+            for s in signals
+        )
 
     def test_liquidity_gate(self, arb_config: ArbConfig):
-        config = ArbConfig(min_edge=0.01, bundle_arb_enabled=True, mm_enabled=False,
-                           taker_fee_bps=0, gas_cost_per_order=0, min_order_size=5.0)
+        config = ArbConfig(
+            min_edge=0.01,
+            bundle_arb_enabled=True,
+            mm_enabled=False,
+            taker_fee_bps=0,
+            gas_cost_per_order=0,
+            min_order_size=5.0,
+        )
         engine = ArbEngine(config)
         group_id = "ml_liquidity_group"
         states = {
-            "ml_liq_a": _make_market_state_ml("ml_liq_a", group_id, 2, yes_ask=0.40, yes_ask_size=3.0),
-            "ml_liq_b": _make_market_state_ml("ml_liq_b", group_id, 2, yes_ask=0.40, yes_ask_size=3.0),
+            "ml_liq_a": _make_market_state_ml(
+                "ml_liq_a", group_id, 2, yes_ask=0.40, yes_ask_size=3.0
+            ),
+            "ml_liq_b": _make_market_state_ml(
+                "ml_liq_b", group_id, 2, yes_ask=0.40, yes_ask_size=3.0
+            ),
         }
-        assert engine._check_multileg_arbitrage(group_id, states, bankroll=1000.0) is None
+        assert (
+            engine._check_multileg_arbitrage(group_id, states, bankroll=1000.0) is None
+        )
 
     def test_re_entry_suppression(self, arb_config: ArbConfig):
         engine = ArbEngine(arb_config)
@@ -363,8 +493,10 @@ class TestCheckMultilegArbitrage:
         multileg_key = f"{group_id}_multileg_long"
         assert multileg_key in engine._active_opportunities
         # Simulate the analyze() guard
-        signal2 = None if multileg_key in engine._active_opportunities else (
-            engine._check_multileg_arbitrage(group_id, states, bankroll=1000.0)
+        signal2 = (
+            None
+            if multileg_key in engine._active_opportunities
+            else (engine._check_multileg_arbitrage(group_id, states, bankroll=1000.0))
         )
         assert signal2 is None
 
@@ -383,17 +515,27 @@ class TestGroupStatesCapEviction:
     def _make_active_state(self, market_id: str, group_id: str) -> MarketState:
         ob = _create_order_book_ml(
             market_id,
-            yes_bid=0.37, yes_ask=0.40, no_bid=0.58, no_ask=0.62, size=200.0,
+            yes_bid=0.37,
+            yes_ask=0.40,
+            no_bid=0.58,
+            no_ask=0.62,
+            size=200.0,
         )
         return MarketState(
             market=Market(
-                market_id=market_id, condition_id=market_id, question="Test",
-                active=True, volume_24h=50000.0, group_id=group_id,
+                market_id=market_id,
+                condition_id=market_id,
+                question="Test",
+                active=True,
+                volume_24h=50000.0,
+                group_id=group_id,
             ),
             order_book=ob,
         )
 
-    def test_updating_existing_group_does_not_evict_when_at_cap(self, arb_config: ArbConfig):
+    def test_updating_existing_group_does_not_evict_when_at_cap(
+        self, arb_config: ArbConfig
+    ):
         """Updating a market in an existing group must not evict any group when len >= 500."""
         engine = ArbEngine(arb_config)
 
@@ -435,7 +577,9 @@ class TestGroupStatesCapEviction:
         engine.analyze(new_state, bankroll=1000.0)
 
         assert len(engine._group_states) == 500
-        assert oldest_group not in engine._group_states, "Oldest group should have been evicted"
+        assert oldest_group not in engine._group_states, (
+            "Oldest group should have been evicted"
+        )
         assert "brand_new_group" in engine._group_states, "New group should be present"
 
 
@@ -458,16 +602,24 @@ class TestMultilegGroupPositionLockedProfit:
 
         # Simulate a YES fill at 0.20 for one leg of a 5-option NegRisk group
         trade = Trade(
-            trade_id="t1", order_id="o1", market_id="market_leg_a",
-            token_type=TokenType.YES, side=OrderSide.BUY,
-            price=0.20, size=50.0, fee=0.0, strategy_tag="multileg_arb",
+            trade_id="t1",
+            order_id="o1",
+            market_id="market_leg_a",
+            token_type=TokenType.YES,
+            side=OrderSide.BUY,
+            price=0.20,
+            size=50.0,
+            fee=0.0,
+            strategy_tag="multileg_arb",
         )
         portfolio.update_from_fill(trade)
 
         exec_engine._maybe_open_group_position("market_leg_a", "multileg_arb")
 
         group = portfolio._open_group_arbs.get("market_leg_a")
-        assert group is not None, "GroupArbPosition should be registered for re-entry guard"
+        assert group is not None, (
+            "GroupArbPosition should be registered for re-entry guard"
+        )
         assert group.locked_profit == 0.0, (
             f"Single-leg multileg position must have locked_profit=0.0, "
             f"got {group.locked_profit:.4f} — a YES position at 0.20 does not lock "
@@ -479,6 +631,7 @@ class TestMultilegGroupPositionLockedProfit:
 # ---------------------------------------------------------------------------
 # Gap-fill recovery tests
 # ---------------------------------------------------------------------------
+
 
 def _make_engine_for_gap_fill():
     """Return (engine, portfolio) with an AsyncMock client."""
@@ -512,7 +665,11 @@ class TestMultilegGapFillMetadata:
             "target_payout": 50.0,
             "total_cost_estimate": 46.0,
         }
-        assert engine._multileg_signal_meta[sid]["market_ids"] == ["mkt_a", "mkt_b", "mkt_c"]
+        assert engine._multileg_signal_meta[sid]["market_ids"] == [
+            "mkt_a",
+            "mkt_b",
+            "mkt_c",
+        ]
         assert engine._multileg_signal_meta[sid]["target_payout"] == 50.0
 
     def test_unknown_signal_is_noop(self):

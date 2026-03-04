@@ -338,8 +338,28 @@ class ExecutionEngine:
             return False
 
         try:
-            current_book = await self.client.get_orderbook(signal.market_id)
             opp_type = opp.opportunity_type
+            if opp_type == OpportunityType.MULTILEG_LONG:
+                # To check multi-leg arb, we re-fetch multiple orderbooks and verify combined edge
+                total_ask = 0.0
+                for leg in signal.orders:
+                    current_book = await self.client.get_orderbook(leg["market_id"])
+                    ask = (
+                        current_book.best_ask_yes
+                        if leg["token_type"] == TokenType.YES
+                        else current_book.best_ask_no
+                    )
+                    if ask is None:
+                        return False
+                    total_ask += ask
+                if (
+                    1.0 - total_ask < 0.02
+                ):  # using fixed value for now if min_edge unknown on config
+                    logger.info(f"Multileg arb closed before execution")
+                    return False
+                return True
+
+            current_book = await self.client.get_orderbook(signal.market_id)
             if opp_type == OpportunityType.BUNDLE_SHORT:
                 best_bid_yes = current_book.best_bid_yes or 0.0
                 best_bid_no = current_book.best_bid_no or 0.0
@@ -349,12 +369,6 @@ class ExecutionEngine:
                         f"Bundle short arb closed before execution on {signal.market_id}"
                     )
                     return False
-            elif opp_type == OpportunityType.MULTILEG_LONG:
-                # To check multi-leg arb we'd need to re-fetch multiple orderbooks.
-                # For simplicity/speed in standard execution flow we might skip full re-check
-                # or rely on the quick timestamp check above, assuming the edge is verified in engine.
-                # Here we just pass it if it's fresh enough.
-                pass
             else:  # BUNDLE_LONG
                 best_ask_yes = current_book.best_ask_yes or 1.0
                 best_ask_no = current_book.best_ask_no or 1.0
@@ -618,7 +632,10 @@ class ExecutionEngine:
         # If both legs of a bundle arb BUY are now filled, record the locked profit.
         # This enables correct PnL and prevents the kill switch from false-firing.
         # Also handle multileg_arb fills to register the re-entry guard.
-        if trade.strategy_tag in ("bundle_arb", "multileg_arb") and trade.side == OrderSide.BUY:
+        if (
+            trade.strategy_tag in ("bundle_arb", "multileg_arb")
+            and trade.side == OrderSide.BUY
+        ):
             self._maybe_open_group_position(trade.market_id, trade.strategy_tag)
 
         # Update risk manager
@@ -678,7 +695,9 @@ class ExecutionEngine:
                 gaps.append({"market_id": market_id, "missing": shortfall})
 
         if not gaps:
-            logger.info(f"Gap-fill recovery for {signal_id}: all legs filled, nothing to do")
+            logger.info(
+                f"Gap-fill recovery for {signal_id}: all legs filled, nothing to do"
+            )
             return
 
         # Step 3 — assess profitability and fill gaps
@@ -740,7 +759,9 @@ class ExecutionEngine:
             except Exception as exc:
                 logger.error(f"Gap-fill recovery error for {gap['market_id']}: {exc}")
 
-    def _maybe_open_group_position(self, market_id: str, strategy_tag: str = "bundle_arb") -> None:
+    def _maybe_open_group_position(
+        self, market_id: str, strategy_tag: str = "bundle_arb"
+    ) -> None:
         """Open an arb pair on the portfolio once the relevant legs are filled.
 
         For bundle_arb: requires both YES and NO positions to exist before opening
