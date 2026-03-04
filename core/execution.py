@@ -98,6 +98,12 @@ class ExecutionEngine:
         # Maps order_id → signal_id for bundle completion tracking
         self._order_signal_map: dict[str, str] = {}
 
+        # Metadata for active multileg signals, keyed by signal_id.
+        # Used by gap-fill recovery when orders time out.
+        # Schema: {signal_id: {"market_ids": [...], "size": float, "target_payout": float,
+        #                       "total_cost_estimate": float}}
+        self._multileg_signal_meta: dict[str, dict] = {}
+
         logger.info(f"ExecutionEngine initialized (dry_run={config.dry_run})")
 
     async def start(self) -> None:
@@ -296,6 +302,23 @@ class ExecutionEngine:
             self.portfolio.register_bundle_signal(signal.signal_id, placed)
             for order in placed:
                 self._order_signal_map[order.order_id] = signal.signal_id
+
+            # For multileg_arb, store metadata so gap-fill recovery can use it if
+            # orders time out before all legs fill.
+            if signal.opportunity and signal.opportunity.is_multileg_arb:
+                size = signal.orders[0]["size"] if signal.orders else 0.0
+                self._multileg_signal_meta[signal.signal_id] = {
+                    "market_ids": [
+                        spec.get("market_id", signal.market_id)
+                        for spec in signal.orders
+                    ],
+                    "size": size,
+                    # In NegRisk, 1 share of any leg pays $1 if that outcome wins.
+                    "target_payout": size,
+                    "total_cost_estimate": sum(
+                        spec["price"] * spec["size"] for spec in signal.orders
+                    ),
+                }
 
     async def _validate_arb_still_live(self, signal: Signal) -> bool:
         """
@@ -529,8 +552,25 @@ class ExecutionEngine:
                 ]
 
                 for order_id in timed_out:
-                    logger.info(f"Order timed out: {order_id}")
-                    await self.cancel_order(order_id)
+                    order = self._open_orders.get(order_id)
+                    signal_id = self._order_signal_map.get(order_id)
+                    if (
+                        order
+                        and getattr(order, "strategy_tag", "") == "multileg_arb"
+                        and signal_id
+                        and signal_id in self._multileg_signal_meta
+                    ):
+                        # Attempt gap-fill recovery rather than blind cancellation.
+                        # This cancels remaining open legs and market-buys any that
+                        # didn't fill, if doing so is still profitable.
+                        logger.info(
+                            f"Multileg order timed out: {order_id} "
+                            f"(signal {signal_id}) — attempting gap-fill recovery"
+                        )
+                        await self._handle_multileg_partial_fills(signal_id)
+                    else:
+                        logger.info(f"Order timed out: {order_id}")
+                        await self.cancel_order(order_id)
 
             except asyncio.CancelledError:
                 raise
@@ -588,6 +628,117 @@ class ExecutionEngine:
             f"Fill: {trade.trade_id} | "
             f"{trade.side.value} {trade.size:.2f} {trade.token_type.value} @ {trade.price:.4f}"
         )
+
+    async def _handle_multileg_partial_fills(self, signal_id: str) -> None:
+        """Gap-fill recovery for a multileg_arb signal whose orders have timed out.
+
+        Steps:
+        1. Cancel all open orders that belong to this signal.
+        2. For each market in the signal, check how many shares actually filled
+           (via the portfolio position).
+        3. If any legs are short of the target and we can still close them at a
+           price that keeps the trade profitable (within a 10% emergency budget),
+           place an aggressive limit order (price=1.0) to act as a market buy.
+        4. Clean up signal metadata regardless of outcome.
+        """
+        if self.risk_manager.state.kill_switch_triggered:
+            logger.warning(
+                f"Gap-fill recovery for {signal_id}: kill switch active, skipping"
+            )
+            self._multileg_signal_meta.pop(signal_id, None)
+            return
+
+        meta = self._multileg_signal_meta.pop(signal_id, None)
+        if not meta:
+            return
+
+        market_ids: list[str] = meta["market_ids"]
+        target_size: float = meta["size"]
+        target_payout: float = meta["target_payout"]
+
+        # Step 1 — cancel remaining open orders for this signal
+        open_for_signal = [
+            oid for oid, sid in self._order_signal_map.items() if sid == signal_id
+        ]
+        for order_id in open_for_signal:
+            await self.cancel_order(order_id)
+            self._order_signal_map.pop(order_id, None)
+
+        # Step 2 — measure fills and total spend
+        total_spent = 0.0
+        gaps: list[dict] = []
+        for market_id in market_ids:
+            pos = self.portfolio.get_position(market_id, TokenType.YES)
+            filled = pos.size if pos else 0.0
+            avg_price = pos.avg_entry_price if pos else 0.0
+            total_spent += filled * avg_price
+
+            shortfall = target_size - filled
+            if shortfall > 1e-6:
+                gaps.append({"market_id": market_id, "missing": shortfall})
+
+        if not gaps:
+            logger.info(f"Gap-fill recovery for {signal_id}: all legs filled, nothing to do")
+            return
+
+        # Step 3 — assess profitability and fill gaps
+        # Allow up to 10% emergency overspend relative to target payout
+        max_additional = (target_payout - total_spent) * 1.1
+        if max_additional <= 0:
+            logger.warning(
+                f"Gap-fill recovery for {signal_id}: already spent "
+                f"${total_spent:.2f} vs ${target_payout:.2f} payout — gaps left open"
+            )
+            return
+
+        logger.info(
+            f"Gap-fill recovery for {signal_id}: "
+            f"{len(gaps)} gap(s), budget=${max_additional:.2f}"
+        )
+        for gap in gaps:
+            try:
+                orderbook: OrderBook = await self.client.get_orderbook(gap["market_id"])
+                asks = orderbook.yes.asks.levels if orderbook.yes else []
+                remaining = gap["missing"]
+                estimated_cost = 0.0
+                for level in asks:
+                    if remaining <= 0:
+                        break
+                    fill = min(remaining, level.size)
+                    estimated_cost += fill * level.price
+                    remaining -= fill
+
+                if remaining > 0:
+                    logger.warning(
+                        f"Gap-fill recovery: insufficient liquidity for "
+                        f"{gap['market_id']} (still {remaining:.2f} short)"
+                    )
+                    continue
+
+                if estimated_cost > max_additional:
+                    logger.warning(
+                        f"Gap-fill recovery: {gap['market_id']} too expensive "
+                        f"(${estimated_cost:.2f} > budget ${max_additional:.2f})"
+                    )
+                    continue
+
+                if not self.config.dry_run:
+                    await self._place_order(
+                        market_id=gap["market_id"],
+                        token_type=TokenType.YES,
+                        side=OrderSide.BUY,
+                        price=1.0,  # aggressive limit = effective market order
+                        size=gap["missing"],
+                        strategy_tag="multileg_recovery",
+                    )
+                else:
+                    logger.info(
+                        f"Gap-fill recovery (dry run): would buy {gap['missing']:.2f} "
+                        f"YES @ market for {gap['market_id']}"
+                    )
+                max_additional -= estimated_cost
+            except Exception as exc:
+                logger.error(f"Gap-fill recovery error for {gap['market_id']}: {exc}")
 
     def _maybe_open_group_position(self, market_id: str, strategy_tag: str = "bundle_arb") -> None:
         """Open an arb pair on the portfolio once the relevant legs are filled.
