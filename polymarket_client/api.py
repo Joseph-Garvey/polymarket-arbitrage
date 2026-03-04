@@ -238,10 +238,12 @@ class PolymarketClient(BasePolymarketClient):
 
             all_markets = []
             offset = 0
-            limit = 100  # Gamma API max per request
-            max_markets = 5000  # Get up to 5000 markets!
+            limit = params.pop("limit", 100)  # Gamma API max per request
+            max_markets = params.pop("max_markets", 5000)  # Get up to 5000 markets!
 
-            logger.info("Fetching ALL available markets from Polymarket...")
+            logger.info(
+                f"Fetching up to {max_markets} available markets from Polymarket..."
+            )
 
             # Paginate to get all markets
             while True:

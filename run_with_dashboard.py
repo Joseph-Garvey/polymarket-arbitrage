@@ -174,13 +174,17 @@ class TradingBotWithDashboard:
         await self.data_feed.start()
 
         # Initialize dashboard integration
+        display_mode = "live" if self.config.is_live else "dry_run"
+        if getattr(self.config, "use_simulation", False):
+            display_mode = "simulation"
+
         self.dashboard_integration = DashboardIntegration(
             data_feed=self.data_feed,
             arb_engine=self.arb_engine,
             execution_engine=self.execution_engine,
             risk_manager=self.risk_manager,
             portfolio=self.portfolio,
-            mode="dry_run" if self.config.is_dry_run else "live",
+            mode=display_mode,
         )
         await self.dashboard_integration.start()
 
@@ -279,9 +283,16 @@ class TradingBotWithDashboard:
             def on_kalshi_progress(count):
                 dashboard_state.cross_platform["kalshi_markets"] = count
 
+            use_simulation = getattr(self.config, "use_simulation", False)
+            kalshi_max_markets = 100 if use_simulation else 5000
+            if use_simulation:
+                logger.info(
+                    "Simulation mode: limiting Kalshi market discovery to 100 markets"
+                )
+
             self._kalshi_markets = await self.kalshi_client.list_all_markets(
                 status="open",
-                max_markets=5000,
+                max_markets=kalshi_max_markets,
                 on_progress=on_kalshi_progress,
             )
             logger.info(f"✓ Loaded {len(self._kalshi_markets)} Kalshi markets")

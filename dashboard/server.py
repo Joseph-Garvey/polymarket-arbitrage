@@ -1674,9 +1674,14 @@ def get_embedded_html() -> str:
             if (state.mode === 'live') {
                 modeBadge.className = 'mode-badge live';
                 modeBadge.textContent = 'LIVE';
+            } else if (state.mode === 'simulation') {
+                modeBadge.className = 'mode-badge simulation';
+                modeBadge.textContent = 'SIMULATION';
+                modeBadge.style.backgroundColor = '#9c27b0';
             } else {
                 modeBadge.className = 'mode-badge dry-run';
                 modeBadge.textContent = 'DRY RUN';
+                modeBadge.style.backgroundColor = '';
             }
             
             // Portfolio

@@ -117,8 +117,17 @@ class DataFeed:
         """Fetch market information for all monitored markets."""
         try:
             if not self.market_ids:
+                use_simulation = getattr(self.config, "use_simulation", False)
                 # Discover markets if none specified - list_markets returns full Market objects!
-                markets = await self.client.list_markets({"active": True})
+                filters: dict = {"active": True}
+                if use_simulation:
+                    # In simulation, only fetch a small subset to start quickly
+                    filters["max_markets"] = 100
+                    logger.info(
+                        "Simulation mode: limiting market discovery to 100 markets"
+                    )
+
+                markets = await self.client.list_markets(filters)
 
                 # Apply filters from config
                 filtered_markets = []
@@ -177,6 +186,9 @@ class DataFeed:
         # Use simulation for demo/screenshots, real data for production
         # Check config.mode.data_mode (set in config.yaml)
         use_simulation = getattr(self.config, "use_simulation", False)
+        logger.info(
+            f"Stream orderbooks: use_simulation={use_simulation} (config={type(self.config)})"
+        )
 
         while self._running:
             try:
