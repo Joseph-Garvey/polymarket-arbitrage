@@ -392,22 +392,24 @@ class Portfolio:
         group_id: str,
         legs: list[GroupArbLeg],
         size: float,
-        locked_profit: float | None = None,
+        locked_profit: Optional[float] = None,
+        fees_paid: float = 0.0,
     ) -> GroupArbPosition:
-        """Record a new group arb (bundle or categorical) opened.
+        """
+        Register a new multi-leg arb group as fully executed.
 
-        ``locked_profit`` may be provided explicitly (e.g. 0.0 for a partial
+        If `locked_profit` is explicitly provided, it is used verbatim (e.g. for partial
         multileg registration used only as a re-entry guard, where profit is
         not yet locked because not all legs have filled).  When omitted it is
-        computed as ``1.0 - total_cost``.
+        computed as ``1.0 - total_cost - fees_paid``.
         """
         total_cost = sum(leg.entry_price for leg in legs)
         if locked_profit is None:
-            locked_profit = 1.0 - total_cost
+            locked_profit = 1.0 - total_cost - fees_paid
             if locked_profit <= 0:
                 logger.warning(
                     f"Group arb opened with locked_profit={locked_profit:.4f} (not profitable): "
-                    f"{group_id} | total_cost={total_cost:.4f}"
+                    f"{group_id} | total_cost={total_cost:.4f} | fees={fees_paid:.4f}"
                 )
 
         group = GroupArbPosition(

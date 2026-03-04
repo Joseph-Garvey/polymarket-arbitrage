@@ -199,7 +199,13 @@ class TradingBot:
                 performance_logger.log_snapshot(pnl, exposure, positions, open_orders)
 
                 # Update risk manager
-                self.risk_manager.update_pnl(pnl["realized_pnl"], pnl["unrealized_pnl"])
+                net_pnl = (
+                    pnl["realized_pnl"] + pnl["unrealized_pnl"] - pnl["total_fees"]
+                )
+                self.risk_manager.update_pnl(net_pnl, 0.0)
+
+                # Clear old signals periodically to prevent memory leaks
+                self.arb_engine.clear_expired_opportunities()
 
                 # Log statistics
                 arb_stats = self.arb_engine.get_stats()

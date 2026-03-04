@@ -461,7 +461,7 @@ class ArbEngine:
             max_size = min(yes_ask_size, no_ask_size)
 
             # Liquidity gate: both legs must have enough depth to execute
-            min_executable = self.config.min_order_size * 2
+            min_executable = self.config.min_order_size
             if yes_ask_size < min_executable or no_ask_size < min_executable:
                 logger.debug(
                     f"Skipping {market_id} bundle long: insufficient liquidity "
@@ -469,12 +469,15 @@ class ArbEngine:
                 )
                 return None
 
-            suggested_size = self._kelly_size(
-                edge=net_edge_long,
-                price=total_ask,
-                max_size=max_size,
-                bankroll=bankroll,
-            )
+            suggested_size = (
+                self._kelly_size(
+                    edge=net_edge_long,
+                    price=total_ask,
+                    max_size=max_size,
+                    bankroll=bankroll,
+                )
+                / 2.0
+            )  # split across legs
 
             opportunity = Opportunity(
                 opportunity_id=f"bundle_long_{uuid.uuid4().hex[:8]}",
@@ -512,7 +515,7 @@ class ArbEngine:
             max_size = min(yes_bid_size, no_bid_size)
 
             # Liquidity gate: both legs must have enough depth to execute
-            min_executable = self.config.min_order_size * 2
+            min_executable = self.config.min_order_size
             if yes_bid_size < min_executable or no_bid_size < min_executable:
                 logger.debug(
                     f"Skipping {market_id} bundle short: insufficient liquidity "
@@ -520,12 +523,15 @@ class ArbEngine:
                 )
                 return None
 
-            suggested_size = self._kelly_size(
-                edge=net_edge_short,
-                price=total_bid,
-                max_size=max_size,
-                bankroll=bankroll,
-            )
+            suggested_size = (
+                self._kelly_size(
+                    edge=net_edge_short,
+                    price=total_bid,
+                    max_size=max_size,
+                    bankroll=bankroll,
+                )
+                / 2.0
+            )  # split across legs
 
             opportunity = Opportunity(
                 opportunity_id=f"bundle_short_{uuid.uuid4().hex[:8]}",
@@ -674,7 +680,7 @@ class ArbEngine:
 
         if net_edge >= self.config.min_edge:
             # Check liquidity gate
-            min_executable = self.config.min_order_size * num_legs
+            min_executable = self.config.min_order_size
             if max_possible_size < min_executable:
                 logger.debug(
                     f"Skipping group {group_id} multileg long: insufficient liquidity "
@@ -682,12 +688,15 @@ class ArbEngine:
                 )
                 return None
 
-            suggested_size = self._kelly_size(
-                edge=net_edge,
-                price=total_yes_ask,
-                max_size=max_possible_size,
-                bankroll=bankroll,
-            )
+            suggested_size = (
+                self._kelly_size(
+                    edge=net_edge,
+                    price=total_yes_ask,
+                    max_size=max_possible_size,
+                    bankroll=bankroll,
+                )
+                / num_legs
+            )  # split across legs
 
             # Avoid re-entry if we already have exposure
             if self._portfolio is not None:
