@@ -177,6 +177,85 @@ class TestRiskSummary:
         assert risk_manager.within_global_limits() is False
 
 
+class TestHedgedOrderExemptions:
+    """Hedged orders (bundle_arb / multileg_arb) bypass exposure limits."""
+
+    def _make_hedged_order(
+        self,
+        market_id: str = "test_market",
+        price: float = 0.55,
+        size: float = 100.0,
+        strategy_tag: str = "bundle_arb",
+        token_type: TokenType = TokenType.YES,
+    ) -> Order:
+        return Order(
+            order_id="hedged_order",
+            market_id=market_id,
+            token_type=token_type,
+            side=OrderSide.BUY,
+            price=price,
+            size=size,
+            status=OrderStatus.PENDING,
+            strategy_tag=strategy_tag,
+        )
+
+    def test_bundle_arb_yes_leg_passes_when_at_market_limit(
+        self, risk_manager: RiskManager
+    ):
+        """YES leg of a bundle arb is allowed even when market is at its limit."""
+        # Push market exposure to exactly the limit via an unhedged fill
+        risk_manager.update_position("test_market", TokenType.YES, 400, 0.50)
+        assert risk_manager._market_exposure["test_market"] == pytest.approx(200.0)
+
+        yes_order = self._make_hedged_order(strategy_tag="bundle_arb")
+        assert risk_manager.check_order(yes_order) is True
+
+    def test_bundle_arb_no_leg_passes_when_yes_leg_filled(
+        self, risk_manager: RiskManager
+    ):
+        """NO leg of a bundle arb is allowed even after YES leg consumed half the budget.
+
+        Without the hedged-order exemption the NO leg would be rejected because
+        YES (0.55 * 100 = $55) + NO (0.45 * 100 = $45) = $100 notional, which
+        pushes the per-market projection above zero for a low-limit config, and
+        for larger sizes can exceed max_position_per_market.
+        """
+        # Simulate YES leg fill adding to per-market exposure
+        risk_manager.update_position("test_market", TokenType.YES, 100, 0.55)
+        assert risk_manager._market_exposure["test_market"] == pytest.approx(55.0)
+
+        no_order = self._make_hedged_order(
+            price=0.45, token_type=TokenType.NO, strategy_tag="bundle_arb"
+        )
+        assert risk_manager.check_order(no_order) is True
+
+    def test_bundle_arb_not_blocked_by_global_limit(self, risk_manager: RiskManager):
+        """Global limit does not block hedged orders."""
+        # Exhaust global budget via unhedged fills
+        risk_manager.state.global_exposure = risk_manager.config.max_global_exposure
+
+        order = self._make_hedged_order(strategy_tag="bundle_arb")
+        assert risk_manager.check_order(order) is True
+
+    def test_multileg_arb_not_blocked_by_global_limit(
+        self, risk_manager: RiskManager
+    ):
+        """multileg_arb orders are also exempt from global exposure limit."""
+        risk_manager.state.global_exposure = risk_manager.config.max_global_exposure
+
+        order = self._make_hedged_order(strategy_tag="multileg_arb")
+        assert risk_manager.check_order(order) is True
+
+    def test_unhedged_order_still_blocked_by_market_limit(
+        self, risk_manager: RiskManager
+    ):
+        """Non-hedged orders are still subject to per-market limits."""
+        risk_manager.update_position("test_market", TokenType.YES, 400, 0.50)
+
+        order = create_order(size=100.0, price=0.50)  # no strategy_tag → unhedged
+        assert risk_manager.check_order(order) is False
+
+
 class TestBlacklistManagement:
     """Tests for blacklist management."""
     

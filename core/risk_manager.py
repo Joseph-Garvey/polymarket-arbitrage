@@ -116,14 +116,23 @@ class RiskManager:
                 )
                 return False
 
-        # Per-market exposure check
+        # Hedged orders (bundle_arb / multileg_arb) skip both per-market and global
+        # exposure limits.  For bundle_arb the YES + NO legs on the same market would
+        # double-count notional even though the net risk is only the locked profit
+        # (total_cost = price_YES + price_NO < 1.0).  For multileg_arb the legs are on
+        # different markets so per-market limits are harmless, but global exposure is
+        # already pre-committed across all legs simultaneously and would be counted
+        # twice if checked again here.
+        strategy_tag = getattr(order, "strategy_tag", "")
+        is_hedged = strategy_tag in ("bundle_arb", "multileg_arb")
+
         current_market_exposure = self._market_exposure.get(order.market_id, 0)
         new_exposure = (
             order.notional if order.side == OrderSide.BUY else -order.notional
         )
         projected_market_exposure = abs(current_market_exposure + new_exposure)
 
-        if projected_market_exposure > self.config.max_position_per_market:
+        if not is_hedged and projected_market_exposure > self.config.max_position_per_market:
             logger.warning(
                 f"Order rejected: would exceed market limit | "
                 f"current={current_market_exposure:.2f} + order={new_exposure:.2f} = "
@@ -131,10 +140,7 @@ class RiskManager:
             )
             return False
 
-        # Global exposure check
-        # Only check global limit for non-hedged orders
-        strategy_tag = getattr(order, "strategy_tag", "")
-        if strategy_tag not in ("bundle_arb", "multileg_arb"):
+        if not is_hedged:
             projected_global = self.state.global_exposure + abs(new_exposure)
             if projected_global > self.config.max_global_exposure:
                 logger.warning(

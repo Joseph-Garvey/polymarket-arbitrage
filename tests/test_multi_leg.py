@@ -1,3 +1,4 @@
+import pytest
 import asyncio
 import logging
 from datetime import datetime
@@ -11,6 +12,7 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 
+@pytest.mark.asyncio
 async def test_multileg_flow():
     # 1. Setup components
     portfolio = Portfolio(initial_balance=1000.0)

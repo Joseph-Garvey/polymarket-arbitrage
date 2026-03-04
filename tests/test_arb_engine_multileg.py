@@ -1,9 +1,27 @@
 """
 Multi-leg arbitrage regression and unit tests.
 """
-from unittest.mock import MagicMock
+import asyncio
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+
+
+def _run(coro):
+    """Run a coroutine, leaving a valid event loop set for subsequent tests.
+
+    asyncio.run() closes and removes the current event loop after completion,
+    which breaks tests that call asyncio.get_event_loop() (e.g. test_new_features.py).
+    Using new_event_loop + set_event_loop avoids that.
+    """
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    try:
+        return loop.run_until_complete(coro)
+    finally:
+        # Do NOT call loop.close() — leave the loop set so subsequent tests that
+        # call asyncio.get_event_loop() still find a valid loop.
+        pass
 
 from core.arb_engine import ArbEngine, ArbConfig
 from core.execution import ExecutionEngine, ExecutionConfig
@@ -456,3 +474,177 @@ class TestMultilegGroupPositionLockedProfit:
             f"profit until all 5 legs fill"
         )
         assert group.unrealized_pnl == 0.0
+
+
+# ---------------------------------------------------------------------------
+# Gap-fill recovery tests
+# ---------------------------------------------------------------------------
+
+def _make_engine_for_gap_fill():
+    """Return (engine, portfolio) with an AsyncMock client."""
+    client = MagicMock()
+    client.cancel_order = AsyncMock(return_value=None)
+    client.place_order = AsyncMock(return_value=None)
+    client.get_orderbook = AsyncMock(return_value=None)
+
+    portfolio = MagicMock()
+    risk_manager = RiskManager(RiskConfig())
+    config = ExecutionConfig(dry_run=True)
+    engine = ExecutionEngine(
+        client=client,
+        risk_manager=risk_manager,
+        portfolio=portfolio,
+        config=config,
+    )
+    return engine, portfolio
+
+
+class TestMultilegGapFillMetadata:
+    """_multileg_signal_meta is populated correctly when a multileg signal is placed."""
+
+    def test_metadata_keys_are_stored(self):
+        """Signal metadata dictionary has the expected structure."""
+        engine, _ = _make_engine_for_gap_fill()
+        sid = "sig_meta_001"
+        engine._multileg_signal_meta[sid] = {
+            "market_ids": ["mkt_a", "mkt_b", "mkt_c"],
+            "size": 50.0,
+            "target_payout": 50.0,
+            "total_cost_estimate": 46.0,
+        }
+        assert engine._multileg_signal_meta[sid]["market_ids"] == ["mkt_a", "mkt_b", "mkt_c"]
+        assert engine._multileg_signal_meta[sid]["target_payout"] == 50.0
+
+    def test_unknown_signal_is_noop(self):
+        """Calling gap-fill for an unknown signal_id returns silently."""
+        engine, _ = _make_engine_for_gap_fill()
+        _run(engine._handle_multileg_partial_fills("nonexistent"))
+        engine.client.cancel_order.assert_not_called()
+        engine.client.place_order.assert_not_called()
+
+    def test_metadata_cleaned_up_after_recovery(self):
+        """Metadata is removed from _multileg_signal_meta after recovery runs."""
+        engine, portfolio = _make_engine_for_gap_fill()
+        sid = "sig_cleanup"
+
+        # All legs filled — portfolio returns full position for every market
+        def mock_get_position(market_id, token_type):
+            pos = MagicMock()
+            pos.size = 50.0
+            pos.avg_entry_price = 0.45
+            return pos
+
+        portfolio.get_position.side_effect = mock_get_position
+
+        engine._multileg_signal_meta[sid] = {
+            "market_ids": ["mkt_x", "mkt_y"],
+            "size": 50.0,
+            "target_payout": 50.0,
+            "total_cost_estimate": 45.0,
+        }
+        _run(engine._handle_multileg_partial_fills(sid))
+        assert sid not in engine._multileg_signal_meta
+
+
+class TestMultilegGapFillRecovery:
+    """_handle_multileg_partial_fills places recovery orders when budget allows."""
+
+    def test_no_gap_skips_recovery_orders(self):
+        """When all legs are fully filled, no recovery order is placed."""
+        engine, portfolio = _make_engine_for_gap_fill()
+        sid = "sig_no_gap"
+
+        def fully_filled(market_id, token_type):
+            pos = MagicMock()
+            pos.size = 50.0
+            pos.avg_entry_price = 0.45
+            return pos
+
+        portfolio.get_position.side_effect = fully_filled
+        engine._multileg_signal_meta[sid] = {
+            "market_ids": ["mkt_a", "mkt_b"],
+            "size": 50.0,
+            "target_payout": 50.0,
+            "total_cost_estimate": 45.0,
+        }
+        _run(engine._handle_multileg_partial_fills(sid))
+        engine.client.place_order.assert_not_called()
+
+    def test_gap_within_budget_triggers_recovery(self):
+        """When a leg is unfilled and within budget, a recovery order is placed."""
+        engine, portfolio = _make_engine_for_gap_fill()
+        engine.config.dry_run = False  # enable real order placement
+        mock_order = MagicMock()
+        mock_order.order_id = "recovery_order_1"
+        engine.client.place_order = AsyncMock(return_value=mock_order)
+        sid = "sig_gap_ok"
+
+        def partial_fill(market_id, token_type):
+            # mkt_a filled, mkt_b not filled
+            pos = MagicMock()
+            if market_id == "mkt_a":
+                pos.size = 50.0
+                pos.avg_entry_price = 0.48
+            else:
+                pos.size = 0.0
+                pos.avg_entry_price = 0.0
+            return pos
+
+        portfolio.get_position.side_effect = partial_fill
+
+        # Orderbook for mkt_b has enough liquidity at 0.45
+        mock_ob = _create_order_book_ml("mkt_b", 0.40, 0.45, 0.55, 0.60, size=60.0)
+
+        async def mock_get_ob(market_id):
+            return mock_ob
+
+        engine.client.get_orderbook = mock_get_ob
+
+        # target_payout=50, total_spent=24 (0.48*50), budget=(50-24)*1.1=28.6
+        engine._multileg_signal_meta[sid] = {
+            "market_ids": ["mkt_a", "mkt_b"],
+            "size": 50.0,
+            "target_payout": 50.0,
+            "total_cost_estimate": 46.5,
+        }
+        _run(engine._handle_multileg_partial_fills(sid))
+
+        # Metadata cleaned up and recovery order placed for the unfilled leg
+        assert sid not in engine._multileg_signal_meta
+        engine.client.place_order.assert_called_once()
+        kw = engine.client.place_order.call_args.kwargs
+        assert kw["market_id"] == "mkt_b"
+        assert kw["price"] == 1.0
+        assert kw["size"] == 50.0
+
+    def test_gap_over_budget_skips_recovery(self):
+        """When the gap-fill cost exceeds budget, no order is placed."""
+        engine, portfolio = _make_engine_for_gap_fill()
+        sid = "sig_gap_over"
+
+        def no_fills(market_id, token_type):
+            pos = MagicMock()
+            pos.size = 0.0
+            pos.avg_entry_price = 0.0
+            return pos
+
+        portfolio.get_position.side_effect = no_fills
+
+        # total_spent=0, target_payout=10 → budget=11
+        # But orderbook shows gap costs 50 (way over budget)
+        mock_ob = _create_order_book_ml("mkt_a", 0.40, 0.99, 0.01, 0.60, size=100.0)
+
+        async def mock_get_ob(market_id):
+            return mock_ob
+
+        engine.client.get_orderbook = mock_get_ob
+
+        engine._multileg_signal_meta[sid] = {
+            "market_ids": ["mkt_a"],
+            "size": 50.0,
+            "target_payout": 10.0,  # tiny payout means tiny budget
+            "total_cost_estimate": 0.0,
+        }
+        _run(engine._handle_multileg_partial_fills(sid))
+        # dry_run=True anyway, but we verify no order would be dispatched
+        engine.client.place_order.assert_not_called()
